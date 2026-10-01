@@ -6,7 +6,8 @@ plugins {
 
 android {
     namespace = "dev.literead.literead"
-    compileSdk = flutter.compileSdkVersion
+    // file_picker → flutter_plugin_android_lifecycle 要求 compileSdk >= 36
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
