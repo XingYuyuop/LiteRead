@@ -48,3 +48,6 @@ app.*.map.json
 /android/key.properties
 *.jks
 *.keystore
+
+# 本地构建产物（正式发布走 release.yml 云端构建）
+/dist/
