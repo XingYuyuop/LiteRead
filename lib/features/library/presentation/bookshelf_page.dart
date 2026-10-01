@@ -285,7 +285,7 @@ class _EmptyState extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           Text(
-            '支持 EPUB / Markdown / TXT\n点击右下角导入，或将文件拖入窗口',
+            '支持 EPUB / MOBI / AZW3 / Markdown / TXT\n点击右下角导入，或将文件拖入窗口',
             textAlign: TextAlign.center,
             style: Theme.of(
               context,

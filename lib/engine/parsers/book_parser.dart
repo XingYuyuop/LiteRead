@@ -4,6 +4,7 @@ import 'dart:io';
 import 'epub_parser.dart' show BookParseException, EpubParser;
 export 'epub_parser.dart' show BookParseException;
 import 'md_parser.dart';
+import 'mobi_parser.dart';
 import 'txt_parser.dart';
 import '../ir/book_document.dart';
 
@@ -110,7 +111,12 @@ class BookParser {
 
       case BookFormat.mobi:
       case BookFormat.azw3:
-        throw const BookParseException('MOBI/AZW3 支持将在 v0.5 提供（M3）');
+        final r = await const MobiParser().parse(bytes);
+        return ParseOutput(
+          document: r.document,
+          format: format,
+          coverBytes: r.coverBytes,
+        );
       case BookFormat.pdf:
         throw const BookParseException('PDF 阅读将在 v0.3 提供（M2）');
     }
