@@ -53,12 +53,18 @@ jobs:
           flutter-version: 3.44.6
           cache: true
       - run: flutter pub get
-      - name: Debug 冒烟构建
-        run: flutter build windows --debug
+      - name: Release 冒烟构建
+        # 不再上传 debug 包：debug 构建依赖 Debug CRT（vcruntime140d.dll），
+        # 无 VS 环境的用户机器上双击无响应（曾导致「程序打不开」反馈）
+        run: flutter build windows --release
+      - name: 打包便携 zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath LiteRead-windows-x64.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-debug
-          path: build/windows/x64/runner/Debug/
+          name: windows-release
+          path: LiteRead-windows-x64.zip
           retention-days: 7
 
-  # release.yml：tag 驱动的签名 APK/AAB + MSIX/Inno 安装器发布（M4 接入，见计划书 §7.3）
+# release.yml：tag v* 驱动签名 APK/AAB + Windows 便携包 → GitHub Release（已接入，见 .github/workflows/release.yml）

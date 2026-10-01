@@ -21,11 +21,15 @@ class ThemeState {
     this.mode = ThemeModeChoice.followSystem,
     this.lightThemeId = 'paper',
     this.darkThemeId = 'dark',
+    this.fixedThemeId,
   });
 
   final ThemeModeChoice mode;
   final String lightThemeId;
   final String darkThemeId;
+
+  /// 固定模式下使用的主题（null 时按系统明暗回退到日/夜主题）
+  final String? fixedThemeId;
 
   /// 解析当前应使用的主题（[systemDark] 为系统当前暗色状态）
   ReaderThemeSpec resolve(bool systemDark) {
@@ -33,7 +37,9 @@ class ThemeState {
       case ThemeModeChoice.followSystem:
         return BuiltinThemes.byId(systemDark ? darkThemeId : lightThemeId);
       case ThemeModeChoice.fixed:
-        return BuiltinThemes.byId(systemDark ? darkThemeId : lightThemeId);
+        return BuiltinThemes.byId(
+          fixedThemeId ?? (systemDark ? darkThemeId : lightThemeId),
+        );
     }
   }
 
@@ -41,11 +47,14 @@ class ThemeState {
     ThemeModeChoice? mode,
     String? lightThemeId,
     String? darkThemeId,
+    String? fixedThemeId,
+    bool clearFixed = false,
   }) {
     return ThemeState(
       mode: mode ?? this.mode,
       lightThemeId: lightThemeId ?? this.lightThemeId,
       darkThemeId: darkThemeId ?? this.darkThemeId,
+      fixedThemeId: clearFixed ? null : (fixedThemeId ?? this.fixedThemeId),
     );
   }
 
@@ -53,12 +62,14 @@ class ThemeState {
     'mode': mode.index,
     'light': lightThemeId,
     'dark': darkThemeId,
+    if (fixedThemeId != null) 'fixed': fixedThemeId,
   };
 
   static ThemeState fromJson(Map<String, dynamic> j) => ThemeState(
     mode: ThemeModeChoice.values[j['mode'] as int? ?? 0],
     lightThemeId: j['light'] as String? ?? 'paper',
     darkThemeId: j['dark'] as String? ?? 'dark',
+    fixedThemeId: j['fixed'] as String?,
   );
 }
 
@@ -87,6 +98,12 @@ class ThemeController extends Notifier<ThemeState> {
 
   Future<void> setMode(ThemeModeChoice mode) async {
     state = state.copyWith(mode: mode);
+    await _persist();
+  }
+
+  /// 固定使用指定主题（阅读页快捷切换 / 设置页「当前主题」）
+  Future<void> setFixedTheme(String id) async {
+    state = state.copyWith(mode: ThemeModeChoice.fixed, fixedThemeId: id);
     await _persist();
   }
 

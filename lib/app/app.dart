@@ -18,6 +18,10 @@ class LiteReadApp extends ConsumerWidget {
     // Material 主题由内置阅读主题派生（标题栏/控件随主题着色）
     final lightSpec = BuiltinThemes.byId(themeState.lightThemeId);
     final darkSpec = BuiltinThemes.byId(themeState.darkThemeId);
+    // 固定模式：日/夜 Material 主题均派生自同一套固定主题
+    final fixedSpec = themeState.mode == ThemeModeChoice.fixed
+        ? BuiltinThemes.byId(themeState.fixedThemeId ?? themeState.lightThemeId)
+        : null;
 
     return MaterialApp.router(
       title: '轻阅 LiteRead',
@@ -25,9 +29,9 @@ class LiteReadApp extends ConsumerWidget {
       routerConfig: router,
       themeMode: themeState.mode == ThemeModeChoice.followSystem
           ? ThemeMode.system
-          : ThemeMode.light,
-      theme: _materialTheme(lightSpec, Brightness.light),
-      darkTheme: _materialTheme(darkSpec, Brightness.dark),
+          : (fixedSpec!.isDark ? ThemeMode.dark : ThemeMode.light),
+      theme: _materialTheme(fixedSpec ?? lightSpec, Brightness.light),
+      darkTheme: _materialTheme(fixedSpec ?? darkSpec, Brightness.dark),
     );
   }
 

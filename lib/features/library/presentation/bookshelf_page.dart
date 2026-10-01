@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -10,6 +11,53 @@ import '../../../core/storage/app_database.dart';
 import '../../../core/theme/reader_theme.dart';
 import '../data/book_repository.dart';
 
+/// 书架视图偏好（排序 / 网格切换），持久化到 settings_kv
+class BookshelfPrefs {
+  const BookshelfPrefs({this.sort = BookSort.lastRead, this.grid = true});
+
+  final BookSort sort;
+  final bool grid;
+
+  BookshelfPrefs copyWith({BookSort? sort, bool? grid}) =>
+      BookshelfPrefs(sort: sort ?? this.sort, grid: grid ?? this.grid);
+
+  Map<String, dynamic> toJson() => {'sort': sort.index, 'grid': grid};
+
+  static BookshelfPrefs fromJson(Map<String, dynamic> j) => BookshelfPrefs(
+    sort: BookSort.values[j['sort'] as int? ?? 0],
+    grid: j['grid'] as bool? ?? true,
+  );
+}
+
+class BookshelfPrefsController extends Notifier<BookshelfPrefs> {
+  static const _key = 'bookshelf.view';
+
+  @override
+  BookshelfPrefs build() {
+    _load();
+    return const BookshelfPrefs();
+  }
+
+  Future<void> _load() async {
+    final db = ref.read(appDatabaseProvider);
+    final raw = await db.getSetting(_key);
+    if (raw != null) {
+      state = BookshelfPrefs.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    }
+  }
+
+  Future<void> update(BookshelfPrefs Function(BookshelfPrefs) fn) async {
+    state = fn(state);
+    final db = ref.read(appDatabaseProvider);
+    await db.setSetting(_key, jsonEncode(state.toJson()));
+  }
+}
+
+final bookshelfPrefsProvider =
+    NotifierProvider<BookshelfPrefsController, BookshelfPrefs>(
+      BookshelfPrefsController.new,
+    );
+
 /// 书架页（计划书 FR-A01/02/04/06）
 class BookshelfPage extends ConsumerStatefulWidget {
   const BookshelfPage({super.key});
@@ -19,8 +67,6 @@ class BookshelfPage extends ConsumerStatefulWidget {
 }
 
 class _BookshelfPageState extends ConsumerState<BookshelfPage> {
-  BookSort _sort = BookSort.lastRead;
-  bool _gridView = true;
   String _keyword = '';
   bool _importing = false;
 
@@ -30,6 +76,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
     final spec = themeState.resolve(
       MediaQuery.platformBrightnessOf(context) == Brightness.dark,
     );
+    final prefs = ref.watch(bookshelfPrefsProvider);
     final repo = ref.watch(bookRepositoryProvider);
     final colorScheme = Theme.of(context).colorScheme;
 
@@ -47,7 +94,9 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
           PopupMenuButton<BookSort>(
             tooltip: '排序',
             icon: const Icon(Icons.sort),
-            onSelected: (s) => setState(() => _sort = s),
+            onSelected: (s) => ref
+                .read(bookshelfPrefsProvider.notifier)
+                .update((p) => p.copyWith(sort: s)),
             itemBuilder: (context) => [
               const PopupMenuItem(
                 value: BookSort.lastRead,
@@ -59,8 +108,10 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
           ),
           IconButton(
             tooltip: '视图',
-            icon: Icon(_gridView ? Icons.view_list : Icons.grid_view),
-            onPressed: () => setState(() => _gridView = !_gridView),
+            icon: Icon(prefs.grid ? Icons.view_list : Icons.grid_view),
+            onPressed: () => ref
+                .read(bookshelfPrefsProvider.notifier)
+                .update((p) => p.copyWith(grid: !p.grid)),
           ),
           IconButton(
             tooltip: '设置',
@@ -70,7 +121,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
         ],
       ),
       body: StreamBuilder<List<Book>>(
-        stream: repo.watchBooks(sort: _sort),
+        stream: repo.watchBooks(sort: prefs.sort),
         builder: (context, snap) {
           var books = snap.data ?? const <Book>[];
           if (_keyword.isNotEmpty) {
@@ -84,11 +135,11 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
                 .toList();
           }
           if (books.isEmpty) {
-            return _EmptyState(importing: _importing, onImport: _importBooks);
+            return _EmptyState(importing: _importing);
           }
           return RefreshIndicator(
             onRefresh: () async {},
-            child: _gridView
+            child: prefs.grid
                 ? GridView.builder(
                     padding: const EdgeInsets.all(16),
                     gridDelegate:
@@ -211,10 +262,9 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
 }
 
 class _EmptyState extends StatelessWidget {
-  const _EmptyState({required this.importing, required this.onImport});
+  const _EmptyState({required this.importing});
 
   final bool importing;
-  final VoidCallback onImport;
 
   @override
   Widget build(BuildContext context) {
@@ -331,7 +381,7 @@ class _BookCard extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     return GestureDetector(
       onTap: () => context.push('/reader/${book.id}'),
-      onLongPress: () => _showActions(context, ref),
+      onLongPress: () => showBookActions(context, ref, book),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -346,28 +396,6 @@ class _BookCard extends ConsumerWidget {
             style: Theme.of(context).textTheme.bodySmall,
           ),
         ],
-      ),
-    );
-  }
-
-  void _showActions(BuildContext context, WidgetRef ref) {
-    showModalBottomSheet<void>(
-      context: context,
-      builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.delete_outline),
-              title: const Text('删除书籍'),
-              onTap: () async {
-                Navigator.pop(context);
-                final repo = ref.read(bookRepositoryProvider);
-                await repo.deleteBook(book.id, deleteManagedFile: true);
-              },
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -396,31 +424,131 @@ class _BookTile extends ConsumerWidget {
       ),
       trailing: IconButton(
         icon: const Icon(Icons.more_vert),
-        onPressed: () => _showActions(context, ref),
+        onPressed: () => showBookActions(context, ref, book),
       ),
       onTap: () => context.push('/reader/${book.id}'),
     );
   }
+}
 
-  void _showActions(BuildContext context, WidgetRef ref) {
-    showModalBottomSheet<void>(
-      context: context,
-      builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.delete_outline),
-              title: const Text('删除书籍'),
-              onTap: () async {
-                Navigator.pop(context);
-                final repo = ref.read(bookRepositoryProvider);
-                await repo.deleteBook(book.id, deleteManagedFile: true);
-              },
-            ),
-          ],
-        ),
+/// 书籍操作菜单（长按封面 / 列表右侧按钮）
+void showBookActions(BuildContext context, WidgetRef ref, Book book) {
+  showModalBottomSheet<void>(
+    context: context,
+    builder: (context) => SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ListTile(
+            leading: const Icon(Icons.info_outline),
+            title: const Text('书籍详情'),
+            onTap: () {
+              Navigator.pop(context);
+              showBookDetails(context, ref, book);
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.delete_outline),
+            title: const Text('删除书籍'),
+            onTap: () async {
+              Navigator.pop(context);
+              final repo = ref.read(bookRepositoryProvider);
+              await repo.deleteBook(book.id, deleteManagedFile: true);
+            },
+          ),
+        ],
       ),
-    );
+    ),
+  );
+}
+
+/// 书籍详情弹窗：元数据 + 阅读进度
+Future<void> showBookDetails(
+  BuildContext context,
+  WidgetRef ref,
+  Book book,
+) async {
+  final repo = ref.read(bookRepositoryProvider);
+  final percent = await repo.getPercent(book.id);
+  Map<String, dynamic> meta = const {};
+  try {
+    if (book.metaJson != null) {
+      meta = jsonDecode(book.metaJson!) as Map<String, dynamic>;
+    }
+  } catch (_) {}
+
+  if (!context.mounted) return;
+
+  Widget row(String label, String value) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 4),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 72,
+          child: Text(label, style: const TextStyle(fontSize: 13)),
+        ),
+        Expanded(
+          child: Text(
+            value,
+            style: const TextStyle(fontSize: 13),
+            textAlign: TextAlign.end,
+          ),
+        ),
+      ],
+    ),
+  );
+
+  final chapters = meta['chapterCount'];
+  final chars = meta['charCount'];
+  final added = DateTime.fromMillisecondsSinceEpoch(book.addedAt);
+
+  showDialog<void>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(book.title, style: const TextStyle(fontSize: 18)),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          row('作者', book.author ?? '佚名'),
+          row('格式', book.format),
+          if (book.fileSize != null) row('大小', formatBytes(book.fileSize!)),
+          if (chapters != null) row('章节', '$chapters 章'),
+          if (chars != null) row('字数', '$chars 字'),
+          row(
+            '进度',
+            percent == null ? '未开始' : '${(percent * 100).toStringAsFixed(1)}%',
+          ),
+          row(
+            '导入时间',
+            '${added.year}-${added.month.toString().padLeft(2, '0')}-${added.day.toString().padLeft(2, '0')}',
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('关闭'),
+        ),
+        FilledButton(
+          onPressed: () {
+            Navigator.pop(context);
+            context.push('/reader/${book.id}');
+          },
+          child: const Text('继续阅读'),
+        ),
+      ],
+    ),
+  );
+}
+
+/// 字节数人类可读化
+String formatBytes(int bytes) {
+  if (bytes < 1024) return '$bytes B';
+  if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+  if (bytes < 1024 * 1024 * 1024) {
+    return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
   }
+  return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(2)} GB';
 }

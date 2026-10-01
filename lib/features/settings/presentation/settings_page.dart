@@ -59,13 +59,39 @@ class SettingsPage extends ConsumerWidget {
             title: const Text('跟随系统切换明暗'),
             trailing: Switch(
               value: themeState.mode == ThemeModeChoice.followSystem,
-              onChanged: (v) => ref
-                  .read(themeControllerProvider.notifier)
-                  .setMode(
-                    v ? ThemeModeChoice.followSystem : ThemeModeChoice.fixed,
-                  ),
+              onChanged: (v) {
+                final ctl = ref.read(themeControllerProvider.notifier);
+                if (!v) {
+                  // 切到固定模式时以当前主题初始化，避免观感跳变
+                  final spec = themeState.resolve(
+                    MediaQuery.platformBrightnessOf(context) == Brightness.dark,
+                  );
+                  ctl.setFixedTheme(spec.id);
+                } else {
+                  ctl.setMode(ThemeModeChoice.followSystem);
+                }
+              },
             ),
           ),
+          // 固定模式下的当前主题
+          if (themeState.mode == ThemeModeChoice.fixed)
+            ListTile(
+              leading: const Icon(Icons.format_paint_outlined),
+              title: const Text('当前主题'),
+              trailing: DropdownButton<String>(
+                value: themeState.fixedThemeId ?? themeState.lightThemeId,
+                underline: const SizedBox.shrink(),
+                items: [
+                  for (final t in BuiltinThemes.all)
+                    DropdownMenuItem(value: t.id, child: Text(t.name)),
+                ],
+                onChanged: (v) {
+                  if (v != null) {
+                    ref.read(themeControllerProvider.notifier).setFixedTheme(v);
+                  }
+                },
+              ),
+            ),
           const _SectionHeader('阅读排版'),
           ListTile(
             leading: const Icon(Icons.format_size),
@@ -102,7 +128,7 @@ class SettingsPage extends ConsumerWidget {
           const ListTile(
             leading: Icon(Icons.local_library_outlined),
             title: Text('轻阅 LiteRead'),
-            subtitle: Text('v0.1.0 · 本地优先 · 无广告无追踪'),
+            subtitle: Text('v0.2.0 · 本地优先 · 无广告无追踪'),
           ),
           ListTile(
             leading: const Icon(Icons.info_outline),

@@ -89,7 +89,8 @@ class SettingsKv extends Table {
   tables: [Books, Progress, Highlights, Bookmarks, BookTags, SettingsKv],
 )
 class AppDatabase extends _$AppDatabase {
-  AppDatabase() : super(_open());
+  /// [executor] 供测试注入内存数据库；生产环境用应用支持目录
+  AppDatabase({QueryExecutor? executor}) : super(executor ?? _open());
 
   @override
   int get schemaVersion => 1;

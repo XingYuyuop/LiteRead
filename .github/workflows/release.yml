@@ -1,0 +1,94 @@
+name: release
+
+# 计划书 §7.3：tag 驱动的云端打包发布
+# push tag v* → Android 签名 APK(split-per-abi) + AAB + Windows release 便携包 → GitHub Release
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.6 # 与 ci.yml 保持一致
+          cache: true
+      - run: flutter pub get
+      - run: flutter test
+      - name: 还原签名密钥（Secrets 缺失时回退 debug 签名）
+        if: ${{ secrets.ANDROID_KEYSTORE_B64 != '' }}
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 -d > android/app/literead-release.jks
+          {
+            echo "storeFile=literead-release.jks"
+            echo "storePassword=${{ secrets.ANDROID_STORE_PASSWORD }}"
+            echo "keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}"
+            echo "keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}"
+          } > android/key.properties
+      - run: flutter build apk --release --split-per-abi
+      - run: flutter build appbundle --release
+      - name: 重命名产物（带版本号）
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          cd build/app/outputs/flutter-apk
+          mkdir -p /tmp/dist
+          for f in app-*-release.apk; do
+            mv "$f" "LiteRead-${VERSION}-$(echo "$f" | sed 's/^app-//;s/-release\.apk$//').apk"
+          done
+          cp ./*.apk /tmp/dist/
+          cp ../bundle/release/*.aab "/tmp/dist/LiteRead-${VERSION}.aab"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-out
+          path: /tmp/dist/*
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.6
+          cache: true
+      - run: flutter pub get
+      - run: flutter test
+      # release 构建：避免 debug CRT 依赖导致用户机器上「双击打不开」
+      - run: flutter build windows --release
+      - name: 打包便携 zip
+        shell: pwsh
+        run: |
+          $version = "${env:GITHUB_REF_NAME}".TrimStart('v')
+          Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath "LiteRead-$version-windows-x64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-out
+          path: LiteRead-*.zip
+
+  release:
+    needs: [build-android, build-windows]
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist }
+      - name: 生成校验和
+        run: cd dist && find . -type f -exec sha256sum {} \; > SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**
+          generate_release_notes: true
+          body: |
+            ## 轻阅 LiteRead ${{ github.ref_name }}
+
+            ### 下载指引
+            - **Android**：`LiteRead-<版本>-arm64-v8a.apk`（绝大多数现代手机）/ `armeabi-v7a.apk`（老设备）
+            - **Windows**：`LiteRead-<版本>-windows-x64.zip`，解压后运行 `literead.exe`（免安装便携版）
+            - 完整性校验见 `SHA256SUMS.txt`
+
+            > Windows SmartScreen 可能对未签名程序弹窗，点击「仍要运行」即可（计划书 R4）。

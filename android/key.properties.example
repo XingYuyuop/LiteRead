@@ -1,0 +1,6 @@
+# 复制为 android/key.properties 并填入真实签名信息（该文件已被 .gitignore 忽略）
+# storeFile 相对 android/app/ 解析；CI 中由 GitHub Secrets 自动生成，见 .github/workflows/release.yml
+storeFile=literead-release.jks
+storePassword=<keystore 密码>
+keyAlias=literead
+keyPassword=<key 密码>

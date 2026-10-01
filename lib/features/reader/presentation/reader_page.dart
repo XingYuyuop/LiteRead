@@ -1,6 +1,9 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' hide Locator;
+import 'package:window_manager/window_manager.dart';
 
 import '../../../app/theme_controller.dart';
 import '../../../core/theme/reader_theme.dart';
@@ -71,6 +74,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     // 键盘翻页（桌面端）
     return KeyboardListener(
       focusNode: _keyboardFocus,
+      autofocus: true,
       onKeyEvent: _onKey,
       child: Scaffold(
         backgroundColor: scaffoldBg,
@@ -143,6 +147,21 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
       return;
     }
     final key = event.logicalKey;
+    final ctrl = HardwareKeyboard.instance.isControlPressed;
+    // Ctrl + ←/→：上一章 / 下一章（附录 C 快捷键表）
+    if (ctrl && key == LogicalKeyboardKey.arrowLeft) {
+      controller.jumpToChapter(
+        ref.read(readerControllerProvider).spineIndex - 1,
+      );
+      return;
+    }
+    if (ctrl && key == LogicalKeyboardKey.arrowRight) {
+      final s = ref.read(readerControllerProvider);
+      if (s.spineIndex + 1 < (s.document?.spine.length ?? 0)) {
+        controller.jumpToChapter(s.spineIndex + 1);
+      }
+      return;
+    }
     if (key == LogicalKeyboardKey.arrowRight ||
         key == LogicalKeyboardKey.space ||
         key == LogicalKeyboardKey.pageDown) {
@@ -150,6 +169,18 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     } else if (key == LogicalKeyboardKey.arrowLeft ||
         key == LogicalKeyboardKey.pageUp) {
       controller.prevPage();
+    } else if (key == LogicalKeyboardKey.home) {
+      // Home / End：本章开头 / 结尾
+      controller.jumpToChapter(
+        ref.read(readerControllerProvider).spineIndex,
+        charOffset: 0,
+      );
+    } else if (key == LogicalKeyboardKey.end) {
+      final s = ref.read(readerControllerProvider);
+      controller.jumpToChapter(
+        s.spineIndex,
+        charOffset: controller.chapterLength(s.spineIndex),
+      );
     } else if (key == LogicalKeyboardKey.escape) {
       Navigator.of(context).maybePop();
     } else if (key == LogicalKeyboardKey.f11) {
@@ -160,12 +191,15 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     }
   }
 
-  void _toggleFullscreen() {
-    final view = View.of(context);
-    if (view.physicalSize.width == view.physicalSize.width) {
-      // 简化：桌面全屏切换走 window_manager（后续版本），这里仅隐藏系统栏
+  Future<void> _toggleFullscreen() async {
+    if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
+      // 桌面端：真实窗口全屏切换（计划书附录 C：F11）
+      final fullscreen = await windowManager.isFullScreen();
+      await windowManager.setFullScreen(!fullscreen);
+    } else {
+      // 移动端：隐藏系统栏的沉浸模式（FR-B10）
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     }
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
   }
 
   Widget _buildReadingArea(
@@ -398,15 +432,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
             for (final t in BuiltinThemes.all)
               Expanded(
                 child: GestureDetector(
-                  onTap: () async {
-                    final themeCtl = ref.read(themeControllerProvider.notifier);
-                    await themeCtl.setMode(ThemeModeChoice.fixed);
-                    if (t.isDark) {
-                      await themeCtl.setDarkTheme(t.id);
-                    } else {
-                      await themeCtl.setLightTheme(t.id);
-                    }
-                  },
+                  onTap: () => ref
+                      .read(themeControllerProvider.notifier)
+                      .setFixedTheme(t.id),
                   child: Container(
                     height: 36,
                     margin: const EdgeInsets.symmetric(horizontal: 4),
