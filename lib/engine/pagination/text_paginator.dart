@@ -1,0 +1,516 @@
+import 'dart:ui' as ui;
+
+import 'package:flutter/painting.dart';
+
+import '../ir/book_document.dart';
+
+/// 排版配置（由 ReaderSettings 派生，分页引擎只认它）
+class LayoutConfig {
+  const LayoutConfig({
+    required this.fontSize,
+    required this.lineHeight,
+    required this.letterSpacing,
+    required this.paragraphSpacing,
+    required this.contentWidth,
+    required this.contentHeight,
+    required this.indentChars,
+    required this.justify,
+    this.fontFamily,
+  });
+
+  final double fontSize;
+  final double lineHeight;
+  final double letterSpacing;
+  final double paragraphSpacing;
+  final double contentWidth;
+  final double contentHeight;
+  final int indentChars;
+  final bool justify;
+  final String? fontFamily;
+
+  double get lineHeightPx => fontSize * lineHeight;
+}
+
+/// 主题提供的文本样式集（分页时烘焙进 TextPainter）
+class LayoutStyleSet {
+  const LayoutStyleSet({
+    required this.config,
+    required this.foreground,
+    required this.secondary,
+    required this.accent,
+    this.fontFallbacks = const [],
+  });
+
+  final LayoutConfig config;
+  final ui.Color foreground;
+  final ui.Color secondary;
+  final ui.Color accent;
+  final List<String> fontFallbacks;
+}
+
+/// 单个已测量块
+class LaidOutBlock {
+  LaidOutBlock({
+    required this.blockIndex,
+    required this.block,
+    required this.painter,
+    required this.lineTops,
+    required this.lineHeights,
+    required this.lineStartChars,
+    required this.spaceAbove,
+    required this.indentWidth,
+    required this.quoteDepth,
+    required this.isImage,
+  });
+
+  final int blockIndex;
+  final Block block;
+  final TextPainter painter;
+
+  /// 每行相对块顶部的 y 偏移
+  final List<double> lineTops;
+  final List<double> lineHeights;
+
+  /// 每行首字符在 block.plainText 中的偏移（已剔除前缀缩进/标号）
+  final List<int> lineStartChars;
+
+  /// 段前间距
+  final double spaceAbove;
+
+  /// 首行缩进宽度（渲染用）
+  final double indentWidth;
+
+  final int quoteDepth;
+
+  /// 图片块
+  final bool isImage;
+
+  /// 图片显示高度（仅图片块）
+  final double imageHeight = 0;
+
+  double get totalHeight =>
+      lineHeights.isEmpty ? 0 : lineTops.last + lineHeights.last;
+}
+
+/// 页内渲染单元：某块的第 [firstLine, firstLine+lineCount) 行
+class PageUnit {
+  const PageUnit(this.blockIndex, this.firstLine, this.lineCount);
+
+  final int blockIndex;
+  final int firstLine;
+  final int lineCount;
+}
+
+/// 页盒：一章内的一页
+class PageBox {
+  const PageBox({
+    required this.spineIndex,
+    required this.startChar,
+    required this.endChar,
+    required this.units,
+  });
+
+  final int spineIndex;
+
+  /// 本章坐标中的起始字符偏移（Locator.charOffset 直接可用）
+  final int startChar;
+  final int endChar;
+  final List<PageUnit> units;
+}
+
+/// 已排版章节：渲染与定位的统一载体
+class LaidOutChapter {
+  const LaidOutChapter({
+    required this.spineIndex,
+    required this.blocks,
+    required this.pages,
+    required this.config,
+    required this.chapterLength,
+  });
+
+  final int spineIndex;
+  final List<LaidOutBlock> blocks;
+  final List<PageBox> pages;
+  final LayoutConfig config;
+  final int chapterLength;
+
+  /// 字符偏移 → 页号（二分）
+  int pageIndexForChar(int charOffset) {
+    var lo = 0;
+    var hi = pages.length - 1;
+    var ans = 0;
+    while (lo <= hi) {
+      final mid = (lo + hi) >> 1;
+      if (pages[mid].startChar <= charOffset) {
+        ans = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return ans;
+  }
+
+  int get pageCount => pages.length;
+}
+
+/// 分页引擎（计划书 §3.4）。
+///
+/// 算法：块 → TextPainter 逐行测量 → 按可视高度贪心填充页；
+/// 单段超页时按行切分。产出 [LaidOutChapter]。
+/// 渲染层复用同一批 TextPainter，保证测量与绘制像素级一致。
+class TextPaginator {
+  const TextPaginator();
+
+  static const _headingScale = {
+    1: 1.55,
+    2: 1.35,
+    3: 1.22,
+    4: 1.12,
+    5: 1.06,
+    6: 1.0,
+  };
+
+  /// 同步分页一章。
+  ///
+  /// [imageAspects]: 图片资源 id → 宽高比（w/h），未知用默认 0.72。
+  Future<LaidOutChapter> paginate({
+    required Chapter chapter,
+    required int spineIndex,
+    required LayoutStyleSet styles,
+    Map<String, double> imageAspects = const {},
+  }) async {
+    final cfg = styles.config;
+    final blocks = <LaidOutBlock>[];
+
+    for (var bi = 0; bi < chapter.blocks.length; bi++) {
+      final block = chapter.blocks[bi];
+      blocks.add(_measureBlock(block, bi, styles, imageAspects));
+      // 分块让出事件循环，避免超长章卡 UI（M1 在主 isolate 分页）
+      if (bi % 64 == 63) {
+        await Future<void>.delayed(Duration.zero);
+      }
+    }
+
+    // 贪心填页
+    final pages = <PageBox>[];
+    final units = <PageUnit>[];
+    var used = 0.0;
+    var pageStartChar = 0;
+
+    /// 记录当前页首个可见字符
+    int firstVisibleChar(int blockIdx, int firstLine) {
+      final lb = blocks[blockIdx];
+      if (firstLine < lb.lineStartChars.length) {
+        return _blockCharBase(chapter, blockIdx) + lb.lineStartChars[firstLine];
+      }
+      return _blockCharBase(chapter, blockIdx);
+    }
+
+    void flush() {
+      if (units.isEmpty) return;
+      final lastUnit = units.last;
+      final lastBlock = blocks[lastUnit.blockIndex];
+      final lastLine = lastUnit.firstLine + lastUnit.lineCount - 1;
+      var endChar =
+          _blockCharBase(chapter, lastUnit.blockIndex) +
+          (lastLine + 1 < lastBlock.lineStartChars.length
+              ? lastBlock.lineStartChars[lastLine + 1]
+              : lastBlock.block.plainText.length);
+      pages.add(
+        PageBox(
+          spineIndex: spineIndex,
+          startChar: pageStartChar,
+          endChar: endChar,
+          units: List.of(units),
+        ),
+      );
+      units.clear();
+      used = 0;
+    }
+
+    for (var bi = 0; bi < blocks.length; bi++) {
+      final lb = blocks[bi];
+      final isFirstOnPage = units.isEmpty;
+      final spaceAbove = isFirstOnPage ? 0.0 : lb.spaceAbove;
+
+      // 整块可放入
+      if (used + spaceAbove + lb.totalHeight <= cfg.contentHeight ||
+          isFirstOnPage && lb.totalHeight <= cfg.contentHeight) {
+        if (isFirstOnPage) pageStartChar = firstVisibleChar(bi, 0);
+        units.add(PageUnit(bi, 0, lb.lineHeights.length));
+        used += spaceAbove + lb.totalHeight;
+        continue;
+      }
+
+      // 放不下：先收尾当前页
+      flush();
+      pageStartChar = firstVisibleChar(bi, 0);
+
+      // 单块超页 → 按行切分
+      var lineIdx = 0;
+      var lineUsed = 0.0;
+      var unitFirstLine = 0;
+      while (lineIdx < lb.lineHeights.length) {
+        final h = lb.lineHeights[lineIdx];
+        if (lineUsed + h > cfg.contentHeight && lineIdx > unitFirstLine) {
+          units.add(PageUnit(bi, unitFirstLine, lineIdx - unitFirstLine));
+          flush();
+          pageStartChar = firstVisibleChar(bi, lineIdx);
+          unitFirstLine = lineIdx;
+          lineUsed = 0;
+        }
+        lineUsed += h;
+        lineIdx++;
+      }
+      if (lineIdx > unitFirstLine) {
+        units.add(PageUnit(bi, unitFirstLine, lineIdx - unitFirstLine));
+        used = lineUsed;
+      }
+    }
+    flush();
+
+    // 兜底：空章至少一页
+    if (pages.isEmpty) {
+      pages.add(
+        PageBox(
+          spineIndex: spineIndex,
+          startChar: 0,
+          endChar: chapter.charLength,
+          units: const [],
+        ),
+      );
+    }
+
+    return LaidOutChapter(
+      spineIndex: spineIndex,
+      blocks: blocks,
+      pages: pages,
+      config: cfg,
+      chapterLength: chapter.charLength,
+    );
+  }
+
+  LaidOutBlock _measureBlock(
+    Block block,
+    int blockIndex,
+    LayoutStyleSet styles,
+    Map<String, double> imageAspects,
+  ) {
+    final cfg = styles.config;
+
+    switch (block.type) {
+      case BlockType.image:
+        return _measureImage(block, blockIndex, styles, imageAspects);
+      case BlockType.hr:
+        return _measureHr(block, blockIndex, styles);
+      default:
+        break;
+    }
+
+    // 文本前缀：首行缩进（中文全角空格）与列表标号。
+    // 前缀不计入 Locator 坐标，行首字符映射时统一剔除。
+    var prefix = '';
+    var indentWidth = 0.0;
+    var fontSize = cfg.fontSize;
+    var fontWeight = FontWeight.normal;
+    var color = styles.foreground;
+    var letterSpacing = cfg.letterSpacing;
+    var height = cfg.lineHeight;
+    var align = cfg.justify ? TextAlign.justify : TextAlign.left;
+    var fontFamily = cfg.fontFamily;
+
+    switch (block.type) {
+      case BlockType.heading:
+        final scale = _headingScale[block.headingLevel] ?? 1.0;
+        fontSize = cfg.fontSize * scale;
+        fontWeight = FontWeight.w700;
+        height = 1.35;
+        align = TextAlign.left;
+        break;
+      case BlockType.listItem:
+        final marker = block.listMarker ?? -1;
+        if (marker == -1) {
+          prefix = '• ';
+        } else {
+          prefix = '$marker. ';
+        }
+        prefix += '\u3000' * 0;
+        break;
+      case BlockType.code:
+        fontFamily = 'monospace';
+        fontSize = cfg.fontSize * 0.88;
+        height = 1.4;
+        align = TextAlign.left;
+        letterSpacing = 0;
+        break;
+      case BlockType.blockquote:
+        break;
+      default:
+        break;
+    }
+
+    // 列表/引用缩进
+    final quoteIndent = block.quoteDepth > 0 ? block.quoteDepth * 18.0 : 0.0;
+    var listIndent = 0.0;
+    if (block.type == BlockType.listItem) {
+      // 前导空格已在 span 中（嵌套层级），此处不额外缩进
+      listIndent = 0.0;
+    }
+
+    if (block.type == BlockType.paragraph && cfg.indentChars > 0) {
+      prefix = '\u3000' * cfg.indentChars;
+      indentWidth = cfg.indentChars * fontSize;
+    }
+
+    // 构建 span
+    final spans = <InlineSpan>[];
+    for (final run in block.spans) {
+      var runColor = color;
+      if (run.hasLink) runColor = styles.accent;
+      spans.add(
+        TextSpan(
+          text: run.text,
+          style: TextStyle(
+            color: runColor,
+            fontSize: fontSize,
+            fontWeight: fontWeight,
+            height: height,
+            letterSpacing: letterSpacing,
+            fontFamily: fontFamily,
+            fontFamilyFallback: styles.fontFallbacks,
+          ),
+        ),
+      );
+    }
+    if (prefix.isNotEmpty) {
+      spans.insert(
+        0,
+        TextSpan(
+          text: prefix,
+          style: TextStyle(
+            color: color,
+            fontSize: fontSize,
+            fontWeight: fontWeight,
+            height: height,
+            letterSpacing: letterSpacing,
+            fontFamily: fontFamily,
+          ),
+        ),
+      );
+    }
+
+    final tp = TextPainter(
+      text: TextSpan(children: spans),
+      textDirection: TextDirection.ltr,
+      textAlign: align,
+    );
+    final availWidth = cfg.contentWidth - quoteIndent - listIndent;
+    tp.layout(maxWidth: availWidth.clamp(40, double.infinity));
+
+    // 逐行信息 + 行首字符偏移
+    final metrics = tp.computeLineMetrics();
+    final lineTops = <double>[];
+    final lineHeights = <double>[];
+    final lineStartChars = <int>[];
+    var y = 0.0;
+    final prefixLen = prefix.length;
+    for (final m in metrics) {
+      lineTops.add(y);
+      lineHeights.add(m.height);
+      final pos = tp.getPositionForOffset(Offset(0, y + m.height / 2));
+      lineStartChars.add((pos.offset - prefixLen).clamp(0, 1 << 30));
+      y += m.height;
+    }
+
+    // 段前间距：标题前更大
+    double spaceAbove;
+    final spacingUnit = cfg.fontSize * cfg.lineHeight;
+    switch (block.type) {
+      case BlockType.heading:
+        spaceAbove = spacingUnit * (block.headingLevel <= 2 ? 1.0 : 0.7);
+        break;
+      case BlockType.blockquote:
+      case BlockType.listItem:
+      case BlockType.code:
+      case BlockType.image:
+      case BlockType.hr:
+      case BlockType.paragraph:
+        spaceAbove = spacingUnit * cfg.paragraphSpacing * 0.6;
+        break;
+    }
+
+    return LaidOutBlock(
+      blockIndex: blockIndex,
+      block: block,
+      painter: tp,
+      lineTops: lineTops,
+      lineHeights: lineHeights,
+      lineStartChars: lineStartChars,
+      spaceAbove: spaceAbove,
+      indentWidth: indentWidth,
+      quoteDepth: block.quoteDepth,
+      isImage: false,
+    );
+  }
+
+  LaidOutBlock _measureImage(
+    Block block,
+    int blockIndex,
+    LayoutStyleSet styles,
+    Map<String, double> imageAspects,
+  ) {
+    final cfg = styles.config;
+    final aspect = imageAspects[block.imageSrc] ?? 0.72; // w/h
+    final w = cfg.contentWidth;
+    var h = w / aspect;
+    if (h > cfg.contentHeight * 0.7) {
+      h = cfg.contentHeight * 0.7;
+    }
+    return LaidOutBlock(
+      blockIndex: blockIndex,
+      block: block,
+      painter: TextPainter(
+        text: const TextSpan(text: ''),
+        textDirection: TextDirection.ltr,
+      ),
+      lineTops: [0],
+      lineHeights: [h],
+      lineStartChars: [0],
+      spaceAbove: cfg.fontSize * cfg.lineHeight * cfg.paragraphSpacing * 0.6,
+      indentWidth: 0,
+      quoteDepth: 0,
+      isImage: true,
+    );
+  }
+
+  LaidOutBlock _measureHr(Block block, int blockIndex, LayoutStyleSet styles) {
+    final cfg = styles.config;
+    final h = cfg.fontSize * 0.8;
+    return LaidOutBlock(
+      blockIndex: blockIndex,
+      block: block,
+      painter: TextPainter(
+        text: const TextSpan(text: ''),
+        textDirection: TextDirection.ltr,
+      ),
+      lineTops: [0],
+      lineHeights: [h],
+      lineStartChars: [0],
+      spaceAbove: cfg.fontSize * cfg.lineHeight * 0.5,
+      indentWidth: 0,
+      quoteDepth: 0,
+      isImage: false,
+    );
+  }
+
+  /// 块在章扁平文本中的起始偏移
+  static int _blockCharBase(Chapter chapter, int blockIdx) {
+    // 偏移 = Σ(前序块文本长 + 1)
+    var pos = 0;
+    for (var i = 0; i < blockIdx; i++) {
+      pos += chapter.blocks[i].plainText.length + 1;
+    }
+    return pos;
+  }
+}

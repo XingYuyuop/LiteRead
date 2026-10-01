@@ -1,0 +1,352 @@
+import 'dart:convert';
+import 'dart:ui' as ui;
+
+import 'package:archive/archive.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:literead/engine/ir/book_document.dart';
+import 'package:literead/engine/pagination/text_paginator.dart';
+import 'package:literead/engine/parsers/book_parser.dart';
+import 'package:literead/engine/parsers/epub_parser.dart';
+import 'package:literead/engine/parsers/md_parser.dart';
+import 'package:literead/engine/parsers/txt_parser.dart';
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  group('Locator（ADR-005 位置标识）', () {
+    test('JSON 序列化往返', () {
+      final l = const Locator(
+        spineIndex: 3,
+        charOffset: 1234,
+        chapterLength: 9999,
+      );
+      final restored = Locator.fromJson(l.toJson());
+      expect(restored.spineIndex, 3);
+      expect(restored.charOffset, 1234);
+      expect(restored.chapterLength, 9999);
+    });
+
+    test('URI 编码往返', () {
+      final l = const Locator(
+        spineIndex: 7,
+        charOffset: 42,
+        chapterLength: 100,
+      );
+      expect(Locator.decode(l.encode()), l);
+    });
+  });
+
+  group('TXT 解析器', () {
+    test('UTF-8 中文分章', () async {
+      final text = StringBuffer();
+      text.writeln('第一章 初入江湖');
+      text.writeln('少年提剑出鞘。');
+      text.writeln('');
+      for (var i = 0; i < 60; i++) {
+        text.writeln('他一路向北，风雪兼程。');
+      }
+      text.writeln('第二章 再遇故人');
+      text.writeln('故人相逢，百感交集。');
+      final result = await const TxtParser().parse(
+        utf8.encode(text.toString()),
+      );
+      expect(result.document.spine.length, 2);
+      expect(result.document.spine[0].title, contains('第一章'));
+      expect(result.document.spine[1].title, contains('第二章'));
+    });
+
+    test('无章节标记长文按长度切块', () async {
+      final text = List.generate(3000, (_) => '这是一段没有章节标记的文本内容。').join('\n');
+      final result = await const TxtParser().parse(text.codeUnits);
+      expect(result.document.spine.length, greaterThanOrEqualTo(2));
+    });
+
+    test('GBK 编码不乱码', () {
+      // "测试" 的 GBK 编码字节
+      final gbkBytes = [0xB2, 0xE2, 0xCA, 0xD4];
+      final result = const TxtParser().detectAndDecode(gbkBytes);
+      expect(result.encoding, TxtEncoding.gbk);
+      expect(result.text, contains('测'));
+    });
+  });
+
+  group('Markdown 解析器', () {
+    test('标题/段落/代码块', () async {
+      const md = '''
+# 我的第一篇文档
+
+这是**加粗**段落，包含*斜体*。
+
+```dart
+void main() {}
+```
+
+- 列表项 A
+- 列表项 B
+
+1. 有序一
+2. 有序二
+''';
+      final result = await const MdParser().parse(md);
+      final doc = result.document;
+      expect(doc.spine, hasLength(1));
+      expect(doc.meta.title, '我的第一篇文档');
+      final blocks = doc.spine.first.blocks;
+      expect(
+        blocks.any((b) => b.type == BlockType.heading && b.headingLevel == 1),
+        isTrue,
+      );
+      expect(blocks.any((b) => b.type == BlockType.code), isTrue);
+      expect(
+        blocks.where((b) => b.type == BlockType.listItem).length,
+        greaterThanOrEqualTo(4),
+      );
+      // 目录含标题锚点
+      expect(doc.toc, isNotEmpty);
+    });
+  });
+
+  group('EPUB 解析器', () {
+    test('最小 EPUB：OPF + spine + NCX + 图片资源', () async {
+      final bytes = _buildMinimalEpub();
+      final result = await const EpubParser().parse(bytes);
+      final doc = result.document;
+
+      expect(doc.meta.title, '测试之书');
+      expect(doc.meta.author, '某人');
+      expect(doc.spine, hasLength(2));
+      expect(
+        doc.spine[0].blocks.any((b) => b.plainText.contains('第一章内容')),
+        isTrue,
+      );
+      expect(doc.toc.first.title, '第一章 标题');
+
+      // 资源惰性加载
+      final img = await doc.resources.get('images/cover.png');
+      expect(img, isNotNull);
+      expect(img, hasLength(4));
+    });
+
+    test('加密 EPUB 明确报错', () async {
+      final archive = Archive();
+      archive.addFile(
+        ArchiveFile('mimetype', 20, 'application/epub+zip'.codeUnits),
+      );
+      archive.addFile(
+        ArchiveFile('META-INF/encryption.xml', 100, '<encryption/>'.codeUnits),
+      );
+      final zip = ZipEncoder().encode(archive);
+      expect(
+        () => const EpubParser().parse(zip),
+        throwsA(isA<BookParseException>()),
+      );
+    });
+  });
+
+  group('格式探测', () {
+    test('扩展名 → 格式', () {
+      expect(formatFromExtension('a/b.epub'), BookFormat.epub);
+      expect(formatFromExtension('b.MD'), BookFormat.md);
+      expect(formatFromExtension('c.azw3'), BookFormat.azw3);
+      expect(formatFromExtension('d.txt'), BookFormat.txt);
+    });
+
+    test('PK 魔数识别 EPUB', () {
+      expect(
+        detectFormat('book.md', [0x50, 0x4B, 3, 4, 0, 0]),
+        BookFormat.epub,
+      );
+      expect(
+        detectFormat('book.txt', [0x25, 0x50, 0x44, 0x46, 0x2D]),
+        BookFormat.pdf,
+      );
+    });
+  });
+
+  group('分页引擎（M1 核心）', () {
+    late LayoutStyleSet styles;
+
+    setUp(() {
+      const cfg = LayoutConfig(
+        fontSize: 18,
+        lineHeight: 1.6,
+        letterSpacing: 0,
+        paragraphSpacing: 0.5,
+        contentWidth: 320,
+        contentHeight: 560,
+        indentChars: 2,
+        justify: true,
+      );
+      styles = LayoutStyleSet(
+        config: cfg,
+        foreground: const ui.Color(0xFF1F2328),
+        secondary: const ui.Color(0xFF6E7781),
+        accent: const ui.Color(0xFF2F6FED),
+      );
+    });
+
+    test('多段落分页：页数 > 1 且所有页覆盖全章', () async {
+      final blocks = List.generate(60, (i) => _para('第$i段。' * 8));
+      final chapter = Chapter(id: 'c1', title: '章一', blocks: blocks);
+      final laid = await const TextPaginator().paginate(
+        chapter: chapter,
+        spineIndex: 0,
+        styles: styles,
+      );
+
+      expect(laid.pages.length, greaterThan(1));
+      // 第一页从 0 开始
+      expect(laid.pages.first.startChar, 0);
+      // 页起点单调不减
+      for (var i = 1; i < laid.pages.length; i++) {
+        expect(
+          laid.pages[i].startChar,
+          greaterThanOrEqualTo(laid.pages[i - 1].startChar),
+        );
+      }
+      // 最后一页终点 = 章长
+      expect(laid.pages.last.endChar, chapter.charLength);
+    });
+
+    test('Locator 映射：偏移 ↔ 页号 稳定（排版无关性验证）', () async {
+      final blocks = List.generate(80, (i) => _para('段落内容$i。' * 10));
+      final chapter = Chapter(id: 'c2', title: '章二', blocks: blocks);
+      final paginator = const TextPaginator();
+
+      // 两套排版参数（字号不同）下，同一 charOffset 都能定位
+      final laidA = await paginator.paginate(
+        chapter: chapter,
+        spineIndex: 0,
+        styles: styles,
+      );
+      final cfgB = LayoutConfig(
+        fontSize: 24,
+        lineHeight: 2.0,
+        letterSpacing: 0,
+        paragraphSpacing: 0.5,
+        contentWidth: 300,
+        contentHeight: 500,
+        indentChars: 2,
+        justify: false,
+      );
+      final laidB = await paginator.paginate(
+        chapter: chapter,
+        spineIndex: 0,
+        styles: LayoutStyleSet(
+          config: cfgB,
+          foreground: const ui.Color(0xFF000000),
+          secondary: const ui.Color(0xFF888888),
+          accent: const ui.Color(0xFF2F6FED),
+        ),
+      );
+
+      expect(laidA.pages.length, greaterThanOrEqualTo(1));
+      expect(laidB.pages.length, greaterThanOrEqualTo(1));
+
+      const probeOffset = 500;
+      final pageA = laidA.pageIndexForChar(probeOffset);
+      final pageB = laidB.pageIndexForChar(probeOffset);
+      expect(pageA, greaterThanOrEqualTo(0));
+      expect(pageB, greaterThanOrEqualTo(0));
+      // 两套排版都能找到包含该偏移的页
+      expect(laidA.pages[pageA].startChar, lessThanOrEqualTo(probeOffset));
+      expect(laidB.pages[pageB].startChar, lessThanOrEqualTo(probeOffset));
+    });
+
+    test('超长单段按行切分', () async {
+      final longText = List.generate(400, (i) => '超长段落第$i句。').join();
+      final chapter = Chapter(id: 'c3', title: '章三', blocks: [_para(longText)]);
+      final laid = await const TextPaginator().paginate(
+        chapter: chapter,
+        spineIndex: 0,
+        styles: styles,
+      );
+      expect(laid.pages.length, greaterThan(3));
+    });
+
+    test('空章至少一页', () async {
+      final chapter = Chapter(id: 'c4', title: '空章', blocks: const []);
+      final laid = await const TextPaginator().paginate(
+        chapter: chapter,
+        spineIndex: 0,
+        styles: styles,
+      );
+      expect(laid.pages.length, 1);
+    });
+
+    test('BookDocument 全局进度加权', () async {
+      final c1 = Chapter(id: 'a', title: 'A', blocks: [_para('x' * 100)]);
+      final c2 = Chapter(id: 'b', title: 'B', blocks: [_para('y' * 300)]);
+      final doc = BookDocument(
+        meta: const BookMeta(title: 'T'),
+        spine: [c1, c2],
+        toc: const [TocEntry(title: 'A', spineIndex: 0)],
+        resources: ResourceStore((_) async => null),
+      );
+      expect(doc.totalChars, 400);
+      expect(doc.globalCharsBefore(1), 100);
+    });
+  });
+}
+
+Block _para(String text) =>
+    Block(type: BlockType.paragraph, spans: [InlineRun(text)]);
+
+/// 构造最小合法 EPUB（zip）：container.xml + OPF + 2 章 + NCX + PNG
+List<int> _buildMinimalEpub() {
+  final archive = Archive();
+  void add(String name, String content) => archive.addFile(
+    ArchiveFile(name, utf8.encode(content).length, utf8.encode(content)),
+  );
+
+  add('mimetype', 'application/epub+zip');
+  add('META-INF/container.xml', '''
+<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>''');
+  add('OEBPS/content.opf', '''
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="uid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>测试之书</dc:title>
+    <dc:creator>某人</dc:creator>
+    <dc:language>zh</dc:language>
+    <meta name="cover" content="cover-img"/>
+  </metadata>
+  <manifest>
+    <item id="c1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c2" href="chapter2.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="cover-img" href="images/cover.png" media-type="image/png"/>
+  </manifest>
+  <spine toc="ncx">
+    <itemref idref="c1"/>
+    <itemref idref="c2"/>
+  </spine>
+</package>''');
+  add('OEBPS/chapter1.xhtml', '''
+<html><body><h1>第一章 标题</h1><p>这是第一章内容。</p></body></html>''');
+  add('OEBPS/chapter2.xhtml', '''
+<html><body><p>第二章内容继续。</p></body></html>''');
+  add('OEBPS/toc.ncx', '''
+<?xml version="1.0" encoding="UTF-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <navMap>
+    <navPoint id="n1" playOrder="1">
+      <navLabel><text>第一章 标题</text></navLabel>
+      <content src="chapter1.xhtml"/>
+    </navPoint>
+    <navPoint id="n2" playOrder="2">
+      <navLabel><text>第二章 标题</text></navLabel>
+      <content src="chapter2.xhtml"/>
+    </navPoint>
+  </navMap>
+</ncx>''');
+  // 假 PNG（4 字节头即可通过长度断言）
+  archive.addFile(
+    ArchiveFile('OEBPS/images/cover.png', 4, [0x89, 0x50, 0x4E, 0x47]),
+  );
+
+  return ZipEncoder().encode(archive);
+}

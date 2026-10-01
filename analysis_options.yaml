@@ -1,0 +1,13 @@
+# 计划书 §3.8：flutter_lints + riverpod_lint 严格模式
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  plugins:
+    - custom_lint
+
+linter:
+  rules:
+    prefer_single_quotes: true
+    always_declare_return_types: true
+    unnecessary_lambdas: true
+    avoid_redundant_argument_values: false

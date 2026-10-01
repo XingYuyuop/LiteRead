@@ -1,0 +1,51 @@
+name: literead
+description: "轻阅 LiteRead — 轻量化多格式阅读器（本地优先 / EPUB·MOBI·AZW3·PDF·MD·TXT）"
+publish_to: 'none'
+
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # 状态管理 / 路由
+  flutter_riverpod: ^2.6.1
+  go_router: ^14.8.1
+
+  # 数据层
+  drift: ^2.26.0
+  drift_flutter: ^0.2.2
+  sqlite3_flutter_libs: ^0.5.28
+  path_provider: ^2.1.5
+  path: ^1.9.1
+
+  # 解析
+  archive: ^4.0.2
+  markdown: ^7.3.0
+  html: ^0.15.5
+  xml: ^6.5.0
+  gbk_codec: ^0.4.0
+  crypto: ^3.0.6
+
+  # UI / 平台
+  file_picker: ^9.2.1
+  window_manager: ^0.4.3
+  intl: ^0.20.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^6.0.0
+  riverpod_lint: ^2.6.5
+  custom_lint: ^0.7.5
+  build_runner: ^2.4.15
+  drift_dev: ^2.26.0
+
+flutter:
+  uses-material-design: true
