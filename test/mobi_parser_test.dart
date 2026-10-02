@@ -244,7 +244,7 @@ void main() {
     );
   });
 
-  test('MOBI：HUFF/CDIC 压缩明确提示不支持', () async {
+  test('MOBI：HUFF/CDIC 词典缺失时明确报错（compression=17480 已支持）', () async {
     final bytes = buildMobi(html: html);
     final rec0Off = _u32At(bytes, 78);
     bytes[rec0Off] = (17480 >> 8) & 0xFF;

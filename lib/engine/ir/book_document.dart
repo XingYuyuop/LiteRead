@@ -5,11 +5,11 @@
 library;
 
 /// 行内样式
-enum InlineFlag { bold, italic, link }
+enum InlineFlag { bold, italic, link, noteref }
 
 /// 行内片段：一段带样式的纯文本
 class InlineRun {
-  const InlineRun(this.text, {this.flags = const {}, this.ruby});
+  const InlineRun(this.text, {this.flags = const {}, this.ruby, this.refId});
 
   final String text;
   final Set<InlineFlag> flags;
@@ -18,9 +18,14 @@ class InlineRun {
   /// 注音不计入 [text]（不影响 Locator 坐标），渲染时绘制在文字上方。
   final String? ruby;
 
+  /// 注标目标 id（EPUB `<a epub:type="noteref" href="#fn1">` 的锚点），
+  /// 对应 [Chapter.footnotes] 中的脚注内容；仅 noteref 片段非空。
+  final String? refId;
+
   bool get hasBold => flags.contains(InlineFlag.bold);
   bool get hasItalic => flags.contains(InlineFlag.italic);
   bool get hasLink => flags.contains(InlineFlag.link);
+  bool get hasNoteref => flags.contains(InlineFlag.noteref);
 }
 
 /// 块级元素类型（HTML-lite 白名单子集）
@@ -69,11 +74,38 @@ class Block {
 
 /// 章：spine 中的一个阅读单元
 class Chapter {
-  const Chapter({required this.id, required this.title, required this.blocks});
+  const Chapter({
+    required this.id,
+    required this.title,
+    required this.blocks,
+    this.footnotes = const {},
+  });
 
   final String id;
   final String title;
   final List<Block> blocks;
+
+  /// 脚注内容（EPUB `<aside epub:type="footnote" id="fn1">` 提取），
+  /// key 为元素 id，与行内注标 run 的 [InlineRun.refId] 对应。
+  final Map<String, Footnote> footnotes;
+
+  /// 章内字符偏移 → 所在行内片段（注标点击命中检测用）；
+  /// 偏移落在块间分隔符上时返回 null。
+  InlineRun? inlineRunAt(int charOffset) {
+    final offsets = blockOffsets;
+    for (var i = 0; i < blocks.length; i++) {
+      final start = offsets[i];
+      final end = start + blocks[i].plainText.length;
+      if (charOffset < start || charOffset >= end) continue;
+      var pos = start;
+      for (final run in blocks[i].spans) {
+        if (charOffset < pos + run.text.length) return run;
+        pos += run.text.length;
+      }
+      return null;
+    }
+    return null;
+  }
 
   /// 章内扁平纯文本：块文本用 '\n' 连接。
   /// [Locator.charOffset] 以此字符串为坐标系，与排版参数无关。
@@ -98,6 +130,17 @@ class Chapter {
   }
 
   int get charLength => plainText.length;
+}
+
+/// 脚注/尾注内容（EPUB aside epub:type="footnote|rearnote|note" 提取）
+class Footnote {
+  const Footnote({required this.id, required this.text});
+
+  /// 源元素 id（noteref href 锚点，不含 #）
+  final String id;
+
+  /// 注释纯文本（多段落以 \n 连接）
+  final String text;
 }
 
 /// 目录条目（含层级）

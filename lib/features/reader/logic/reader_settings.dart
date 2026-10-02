@@ -13,9 +13,9 @@ const cornerOptionLabels = ['无', '时间', '电量', '进度', '页码', '书�
 class ReaderSettings {
   const ReaderSettings({
     this.fontSize = 18,
-    this.lineHeight = 1.6,
+    this.lineHeight = 1.65,
     this.letterSpacing = 0.0,
-    this.paragraphSpacing = 0.5,
+    this.paragraphSpacing = 0.85,
     this.marginTop = 24,
     this.marginBottom = 24,
     this.marginLeft = 16,
@@ -137,9 +137,9 @@ class ReaderSettings {
 
   static ReaderSettings fromJson(Map<String, dynamic> j) => ReaderSettings(
     fontSize: (j['fontSize'] as num?)?.toDouble() ?? 18,
-    lineHeight: (j['lineHeight'] as num?)?.toDouble() ?? 1.6,
+    lineHeight: (j['lineHeight'] as num?)?.toDouble() ?? 1.65,
     letterSpacing: (j['letterSpacing'] as num?)?.toDouble() ?? 0,
-    paragraphSpacing: (j['paragraphSpacing'] as num?)?.toDouble() ?? 0.5,
+    paragraphSpacing: (j['paragraphSpacing'] as num?)?.toDouble() ?? 0.85,
     marginTop: (j['marginTop'] as num?)?.toDouble() ?? 24,
     marginBottom: (j['marginBottom'] as num?)?.toDouble() ?? 24,
     marginLeft: (j['marginLeft'] as num?)?.toDouble() ?? 16,

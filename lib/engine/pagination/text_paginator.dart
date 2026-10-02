@@ -389,6 +389,8 @@ class TextPaginator {
     for (final run in block.spans) {
       var runColor = color;
       if (run.hasLink) runColor = styles.accent;
+      // 注标（脚注引用）：强调色提示可点
+      if (run.hasNoteref) runColor = styles.accent;
       spans.add(
         TextSpan(
           text: run.text,
@@ -440,24 +442,44 @@ class TextPaginator {
       textAlign: align,
     );
     final availWidth = cfg.contentWidth - quoteIndent - listIndent;
-    tp.layout(maxWidth: availWidth.clamp(40, double.infinity));
 
-    // 逐行信息 + 行首字符偏移
-    final metrics = tp.computeLineMetrics();
-    final lineTops = <double>[];
-    final lineHeights = <double>[];
-    final lineStartChars = <int>[];
-    var y = 0.0;
-    final prefixLen = prefix.length;
-    for (final m in metrics) {
-      lineTops.add(y);
-      lineHeights.add(m.height);
-      final pos = tp.getPositionForOffset(Offset(0, y + m.height / 2));
-      lineStartChars.add((pos.offset - prefixLen).clamp(0, 1 << 30));
-      y += m.height;
+    // 按给定宽度排版并提取逐行信息（孤行控制会二次排版，抽成闭包复用）
+    (List<double>, List<double>, List<int>) layoutAt(double width) {
+      tp.layout(maxWidth: width.clamp(40, double.infinity));
+      final metrics = tp.computeLineMetrics();
+      final tops = <double>[];
+      final heights = <double>[];
+      final starts = <int>[];
+      var y = 0.0;
+      final prefixLen = prefix.length;
+      for (final m in metrics) {
+        tops.add(y);
+        heights.add(m.height);
+        final pos = tp.getPositionForOffset(Offset(0, y + m.height / 2));
+        starts.add((pos.offset - prefixLen).clamp(0, 1 << 30));
+        y += m.height;
+      }
+      return (tops, heights, starts);
     }
 
-    // 段前间距：标题前更大
+    var (lineTops, lineHeights, lineStartChars) = layoutAt(availWidth);
+
+    // 孤行控制（现代排版规范）：段落末行仅剩 1–2 字时（如「气。」「相交。」），
+    // 收窄可用宽度两个字号，把尾部 1–2 字拉回末行，使末行至少 3 字；
+    // 测量与绘制共用同一 TextPainter，二次排版后高度自动保持一致
+    if (block.type == BlockType.paragraph &&
+        lineStartChars.length >= 2 &&
+        block.plainText.length - lineStartChars.last <= 2) {
+      final (t2, h2, s2) = layoutAt(availWidth - cfg.fontSize * 2);
+      if (s2.isNotEmpty && block.plainText.length - s2.last > 2) {
+        lineTops = t2;
+        lineHeights = h2;
+        lineStartChars = s2;
+      }
+    }
+
+    // 段前间距：标题前更大；正文段落取 paragraphSpacing × 整行高
+    // （默认 0.85 行，配合 1.65 行距达到舒适的阅读密度）
     double spaceAbove;
     final spacingUnit = cfg.fontSize * cfg.lineHeight;
     switch (block.type) {
@@ -470,7 +492,7 @@ class TextPaginator {
       case BlockType.image:
       case BlockType.hr:
       case BlockType.paragraph:
-        spaceAbove = spacingUnit * cfg.paragraphSpacing * 0.6;
+        spaceAbove = spacingUnit * cfg.paragraphSpacing;
         break;
     }
 

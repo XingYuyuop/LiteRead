@@ -6,6 +6,7 @@ import '../features/backup/presentation/backup_page.dart';
 import '../features/library/presentation/bookshelf_page.dart';
 import '../features/reader/presentation/reader_page.dart';
 import '../features/settings/presentation/settings_page.dart';
+import '../features/stats/presentation/stats_page.dart';
 
 /// 阅读页使用根 Navigator，全屏覆盖书架
 final rootNavigatorKey = GlobalKey<NavigatorState>();
@@ -42,6 +43,16 @@ final routerProvider = Provider<GoRouter>((ref) {
         pageBuilder: (context, state) => CustomTransitionPage(
           key: state.pageKey,
           child: const BackupPage(),
+          transitionsBuilder: (_, animation, _, child) =>
+              FadeTransition(opacity: animation, child: child),
+        ),
+      ),
+      GoRoute(
+        path: '/stats',
+        name: 'stats',
+        pageBuilder: (context, state) => CustomTransitionPage(
+          key: state.pageKey,
+          child: const StatsPage(),
           transitionsBuilder: (_, animation, _, child) =>
               FadeTransition(opacity: animation, child: child),
         ),

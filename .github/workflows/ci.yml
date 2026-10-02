@@ -67,4 +67,43 @@ jobs:
           path: LiteRead-windows-x64.zip
           retention-days: 7
 
-# release.yml：tag v* 驱动签名 APK/AAB + Windows 便携包 → GitHub Release（已接入，见 .github/workflows/release.yml）
+  # 版本号自动递增（语义化版本规范，见 docs/VERSIONING.md）：
+  # 主干测试通过后 patch +1（1.0.1 → 1.0.2 … 1.0.9 → 1.1.0），上限 9.9.9。
+  # 提交信息带 [skip ci] 防止触发新一轮流水线造成循环。
+  bump-version:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: lint-test
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: patch 版本 +1 并提交
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          V=$(grep -E '^version:' pubspec.yaml | sed 's/version: *//; s/[^0-9.].*//')
+          if ! echo "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::pubspec.yaml 版本号必须是 X.Y.Z 语义化格式，当前为：$V"
+            exit 1
+          fi
+          NEXT=$(echo "$V" | awk -F. '{
+            z = $3 + 1; y = $2; x = $1;
+            if (z > 9) { z = 0; y++ }
+            if (y > 9) { y = 0; x++ }
+            if (x > 9) { print "MAXED"; exit }
+            printf "%d.%d.%d", x, y, z
+          }')
+          if [ "$NEXT" = "MAXED" ]; then
+            echo "::error::版本已达上限 9.9.9，请人工评估后重置版本号"
+            exit 1
+          fi
+          sed -i "s/^version: .*/version: $NEXT+${GITHUB_RUN_NUMBER}/" pubspec.yaml
+          git add pubspec.yaml
+          git commit -m "chore(version): bump to v$NEXT [skip ci]"
+          git push
+
+# release.yml：tag v* / 手动触发签名构建并发布 GitHub Release（见 .github/workflows/release.yml）
+# 版本规范：X.Y.Z 语义化版本，pubspec.yaml 为唯一版本源，上限 9.9.9（docs/VERSIONING.md）

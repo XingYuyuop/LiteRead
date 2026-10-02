@@ -1,12 +1,10 @@
 name: release
 
-# 计划书 §7.3：云端打包发布
+# 计划书 §7.3：云端打包发布（语义化版本规范见 docs/VERSIONING.md）
 # 两条触发路径：
-#   1. push tag v*        → 正式版（stable）：Android 签名 APK/AAB + Windows 便携包 → GitHub Release
-#   2. workflow_dispatch  → 可选 stable / beta 通道
-# 版本号规则（X.Y.Z.W，每位 0..9，9 进位，如 0.0.0.9 → 0.0.1.0）：
-#   - 正式版（workflow_dispatch stable）：自动取远端 tag 最大版本并逐位递增，起始 0.0.0.1
-#   - beta：同一基准版本 + -beta.N 后缀，以 prerelease 形式发布
+#   1. push tag v*        → 正式版（stable）：以 tag 版本为准
+#   2. workflow_dispatch  → stable：以 pubspec.yaml 当前版本发布；beta：当前版本 + -beta.N
+# 版本号规则：严格语义化 X.Y.Z（0..9 每位，上限 9.9.9），pubspec.yaml 为唯一版本源。
 on:
   push:
     tags: ['v*']
@@ -38,40 +36,33 @@ jobs:
           CH: ${{ inputs.channel }}
         run: |
           set -e
-          # 远端 tag 中最大的 vX.Y.Z.W（不足 4 段补 .0，忽略 beta 等非法版本）
-          MAX=$(git ls-remote --tags origin 'v*' \
-            | awk '{print $2}' \
-            | sed -E 's|refs/tags/||; s|\^\{\}$||' \
-            | while read -r t; do
-                v="${t#v}"
-                while [ "$(echo "$v" | awk -F. '{print NF}')" -lt 4 ]; do v="$v.0"; done
-                if echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
-                  echo "$v"
-                fi
-              done | sort -V | tail -1)
-          [ -z "$MAX" ] && MAX="0.0.0.0"
-          # 逐位递增：每位 0..9，9 进位（0.0.0.9 → 0.0.1.0）
-          NEXT=$(printf '%s' "$MAX" | awk -F. '{
-            d=$4+1; c=$3; b=$2; a=$1;
-            if (d>9) { d=0; c++ }
-            if (c>9) { c=0; b++ }
-            if (b>9) { b=0; a++ }
-            printf "%d.%d.%d.%d", a, b, c, d
-          }')
+          # pubspec.yaml 中的语义化版本（唯一版本源）
+          V=$(grep -E '^version:' pubspec.yaml | sed 's/version: *//; s/[^0-9.].*//')
+          if ! echo "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::pubspec.yaml 版本号必须是 X.Y.Z 语义化格式，当前为：$V"
+            exit 1
+          fi
+          # 上限 9.9.9 校验
+          if [ "$(echo "$V" | awk -F. '{print ($1>9)||($2>9)||($3>9)}')" = "1" ]; then
+            echo "::error::版本号 $V 超出上限 9.9.9"
+            exit 1
+          fi
           if [ "$EVENT" = "push" ]; then
-            # tag 触发：以 tag 名为准（补足 4 段）
-            V="${GITHUB_REF_NAME#v}"
-            while [ "$(echo "$V" | awk -F. '{print NF}')" -lt 4 ]; do V="$V.0"; done
+            # tag 触发：tag 版本必须与 pubspec 一致（保证可追溯）
+            TAG_V="${GITHUB_REF_NAME#v}"
+            if [ "$TAG_V" != "$V" ]; then
+              echo "::error::tag 版本（$TAG_V）与 pubspec.yaml 版本（$V）不一致，请对齐后再发布"
+              exit 1
+            fi
             echo "version=$V" >> "$GITHUB_OUTPUT"
             echo "channel=stable" >> "$GITHUB_OUTPUT"
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           elif [ "$CH" = "stable" ]; then
-            # 正式版：版本号自动递增（无历史 tag 时从 0.0.0.1 开始）
-            echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+            echo "version=$V" >> "$GITHUB_OUTPUT"
             echo "channel=stable" >> "$GITHUB_OUTPUT"
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           else
-            echo "version=${NEXT}-beta.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+            echo "version=${V}-beta.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
             echo "channel=beta" >> "$GITHUB_OUTPUT"
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           fi
@@ -193,3 +184,32 @@ jobs:
           prerelease: ${{ needs.meta.outputs.prerelease }}
           body_path: release-body.md
           generate_release_notes: true
+
+  # 发布成功通知（t15）：Release 成功发出后标记任务完成。
+  # - 写入 Workflow Summary（Actions 页可见）
+  # - 若配置了 secrets.NOTIFY_WEBHOOK（JSON POST，如企业微信/钉钉/飞书机器人），
+  #   同时推送通知；未配置则跳过。
+  notify:
+    needs: [meta, release]
+    runs-on: ubuntu-latest
+    if: ${{ always() && needs.release.result == 'success' }}
+    env:
+      WEBHOOK: ${{ secrets.NOTIFY_WEBHOOK }}
+    steps:
+      - name: 发布成功通知
+        run: |
+          {
+            echo "## ✅ LiteRead v${{ needs.meta.outputs.version }} 发布成功"
+            echo ""
+            echo "- 通道：${{ needs.meta.outputs.channel }}"
+            echo "- 链接：https://github.com/${{ github.repository }}/releases/tag/v${{ needs.meta.outputs.version }}"
+            echo "- 时间：$(date -u '+%Y-%m-%d %H:%M UTC')"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$WEBHOOK" ]; then
+            curl -fsSL -X POST \
+              -H 'Content-Type: application/json' \
+              -d "{\"msgtype\":\"text\",\"text\":{\"content\":\"LiteRead v${{ needs.meta.outputs.version }} 发布成功（${{ needs.meta.outputs.channel }}）https://github.com/${{ github.repository }}/releases/tag/v${{ needs.meta.outputs.version }}\"}}" \
+              "$WEBHOOK" || echo "::warning::通知 Webhook 调用失败（不影响发布结果）"
+          else
+            echo "未配置 NOTIFY_WEBHOOK，仅写入 Summary。"
+          fi

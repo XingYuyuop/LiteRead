@@ -155,15 +155,25 @@ class EpubParser {
 
     // 5. 逐章解析
     final chapters = <Chapter>[];
+    // 每章的 id 锚点表（目录锚点 → 章内字符偏移；与 chapters 同序）
+    final anchorMaps = <Map<String, (int, int)>>[];
     for (final href in spineHrefs) {
       final data = manifestResource(href);
       if (data == null) {
         chapters.add(Chapter(id: href, title: '（缺失：$href）', blocks: const []));
+        anchorMaps.add(const {});
         continue;
       }
       final html = _decodeText(data);
       final doc = html_parser.parse(html);
-      final blocks = converter.convertDocument(doc);
+      final anchors = <String, (int, int)>{};
+      final footnotes = <String, Footnote>{};
+      final blocks = converter.convertDocument(
+        doc,
+        anchors: anchors,
+        footnotesOut: footnotes,
+      );
+      anchorMaps.add(anchors);
       // 关键修复：图片 src 相对「章节文件目录」而非 OPF 目录，
       // 统一解析为 zip 内绝对路径，否则插图资源全部 404。
       // 注意 spine href 是 OPF 相对路径，需先合并 OPF 目录得到章节的 zip 路径。
@@ -177,8 +187,18 @@ class EpubParser {
           );
         }
       }
-      final chapterTitle = _firstHeading(doc) ?? _fileNameTitle(href);
-      chapters.add(Chapter(id: href, title: chapterTitle, blocks: blocks));
+      // 目录标题兜底：不用 cover/section006 等原始文件名标识，
+      // 首个标题块 → 「第 N 节」
+      final chapterTitle =
+          _firstHeading(doc) ?? '第 ${chapters.length + 1} 节';
+      chapters.add(
+        Chapter(
+          id: href,
+          title: chapterTitle,
+          blocks: blocks,
+          footnotes: footnotes,
+        ),
+      );
     }
 
     // 6. 目录：EPUB3 nav → NCX → 兜底（每章一项目录）
@@ -186,13 +206,13 @@ class EpubParser {
     if (navHref != null) {
       final navData = manifestResource(navHref);
       if (navData != null) {
-        toc.addAll(_parseNav(_decodeText(navData), spineHrefs));
+        toc.addAll(_parseNav(_decodeText(navData), spineHrefs, chapters, anchorMaps));
       }
     }
     if (toc.isEmpty && ncxHref != null) {
       final ncxData = manifestResource(ncxHref);
       if (ncxData != null) {
-        toc.addAll(_parseNcx(_decodeText(ncxData), spineHrefs));
+        toc.addAll(_parseNcx(_decodeText(ncxData), spineHrefs, chapters, anchorMaps));
       }
     }
     if (toc.isEmpty) {
@@ -234,7 +254,12 @@ class EpubParser {
   // ---- 目录解析 ----
 
   /// EPUB3 nav.xhtml：<nav epub:type="toc"> 下的 ol/li/a
-  List<TocEntry> _parseNav(String html, List<String> spineHrefs) {
+  List<TocEntry> _parseNav(
+    String html,
+    List<String> spineHrefs,
+    List<Chapter> chapters,
+    List<Map<String, (int, int)>> anchorMaps,
+  ) {
     final doc = html_parser.parse(html);
     final entries = <TocEntry>[];
     dom.Element? tocNav;
@@ -255,13 +280,20 @@ class EpubParser {
         final a = li.children.where((e) => e.localName == 'a').firstOrNull;
         if (a != null) {
           final href = a.attributes['href'];
+          final title = a.text.trim();
           final idx = _spineIndexOf(href, spineHrefs);
-          if (idx >= 0) {
+          // 空标题条目回退为章标题（避免目录出现空白项）
+          if (idx >= 0 && title.isNotEmpty) {
             entries.add(
               TocEntry(
-                title: a.text.trim(),
+                title: title,
                 spineIndex: idx,
-                charOffset: _charOffsetOf(href),
+                charOffset: _anchorOffset(
+                  href,
+                  chapters,
+                  anchorMaps,
+                  idx,
+                ),
                 depth: depth,
               ),
             );
@@ -278,7 +310,12 @@ class EpubParser {
   }
 
   /// EPUB2 toc.ncx：navMap/navPoint（可嵌套）
-  List<TocEntry> _parseNcx(String xmlStr, List<String> spineHrefs) {
+  List<TocEntry> _parseNcx(
+    String xmlStr,
+    List<String> spineHrefs,
+    List<Chapter> chapters,
+    List<Map<String, (int, int)>> anchorMaps,
+  ) {
     final doc = _parseXml(xmlStr);
     final entries = <TocEntry>[];
     final navMap = doc.findAllElements('navMap').firstOrNull;
@@ -294,7 +331,7 @@ class EpubParser {
             TocEntry(
               title: label,
               spineIndex: idx,
-              charOffset: _charOffsetOf(src),
+              charOffset: _anchorOffset(src, chapters, anchorMaps, idx),
               depth: depth,
             ),
           );
@@ -305,6 +342,31 @@ class EpubParser {
 
     walk(navMap, 0);
     return entries;
+  }
+
+  /// 目录 href 锚点 → 章内字符偏移：有锚点记录时精确定位，
+  /// 否则落章首。单文件整书 EPUB 的目录跳转由此恢复可用。
+  int _anchorOffset(
+    String? href,
+    List<Chapter> chapters,
+    List<Map<String, (int, int)>> anchorMaps,
+    int spineIndex,
+  ) {
+    if (href == null || spineIndex < 0 || spineIndex >= chapters.length) {
+      return 0;
+    }
+    final f = href.indexOf('#');
+    if (f < 0) return 0;
+    final id = Uri.decodeComponent(href.substring(f + 1));
+    if (id.isEmpty) return 0;
+    final a = anchorMaps[spineIndex][id];
+    if (a == null) return 0;
+    final (bi, ci) = a;
+    final chapter = chapters[spineIndex];
+    if (bi >= chapter.blocks.length) return 0;
+    final offs = chapter.blockOffsets;
+    final maxInBlock = chapter.blocks[bi].plainText.length;
+    return offs[bi] + ci.clamp(0, maxInBlock);
   }
 }
 
@@ -395,20 +457,6 @@ String _stripFragment(String href) {
   final f = h.indexOf('#');
   if (f >= 0) h = h.substring(0, f);
   return _norm(Uri.decodeComponent(h));
-}
-
-int _charOffsetOf(String? href) {
-  if (href == null) return 0;
-  final f = href.indexOf('#');
-  if (f < 0) return 0;
-  return 0; // M1：锚点统一落到章首（ID 级偏移在 M3 标注时精确化）
-}
-
-String _fileNameTitle(String href) {
-  final name = href.split('/').last;
-  return Uri.decodeComponent(
-    name.replaceFirst(RegExp(r'\.[^.]+$'), '').replaceAll('_', ' '),
-  );
 }
 
 String? _firstHeading(dom.Document doc) {

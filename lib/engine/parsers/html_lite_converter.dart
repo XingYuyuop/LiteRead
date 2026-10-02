@@ -9,30 +9,52 @@ import '../ir/book_document.dart';
 ///
 /// 只保留 p/h1-h6/img/em/strong/b/i/blockquote/ul/ol/li/pre/code/hr/br/a
 /// 等语义标签；其余降级为纯文本。CSS 颜色一律丢弃，映射到当前主题。
+///
+/// EPUB 附加能力：
+/// - `<aside epub:type="footnote|rearnote|note" id>` 提取为脚注内容，不展开进正文；
+/// - `<a epub:type="noteref" href="#fn1">` 标记为注标 run（refId）；
+/// - 所有带 id 的元素记录锚点位置（目录锚点 → 章内字符偏移）。
 class HtmlLiteConverter {
   const HtmlLiteConverter();
 
   /// 解析 HTML 字符串并提取块序列
-  List<Block> convert(String html) {
+  ///
+  /// [anchors]: 元素 id → (块序号, 块内字符偏移)（可选输出）；
+  /// [footnotesOut]: 脚注 id → 内容（可选输出）。
+  List<Block> convert(String html, {Map<String, (int, int)>? anchors, Map<String, Footnote>? footnotesOut}) {
     final doc = html_parser.parse(utf8.decode(utf8.encode(html)));
     final body = doc.body;
     if (body == null) return const [];
     final ctx = _Ctx();
     _walkChildren(body.nodes, ctx, quoteDepth: 0);
+    anchors?.addAll(ctx.anchors);
+    footnotesOut?.addAll(ctx.footnotes);
     return ctx.blocks;
   }
 
-  List<Block> convertDocument(dom.Document doc) {
+  List<Block> convertDocument(
+    dom.Document doc, {
+    Map<String, (int, int)>? anchors,
+    Map<String, Footnote>? footnotesOut,
+  }) {
     final body = doc.body;
     if (body == null) return const [];
     final ctx = _Ctx();
     _walkChildren(body.nodes, ctx, quoteDepth: 0);
+    anchors?.addAll(ctx.anchors);
+    footnotesOut?.addAll(ctx.footnotes);
     return ctx.blocks;
   }
 }
 
 class _Ctx {
   final List<Block> blocks = [];
+
+  /// 元素 id → (块序号, 块内字符偏移)
+  final Map<String, (int, int)> anchors = {};
+
+  /// 脚注 id → 内容
+  final Map<String, Footnote> footnotes = {};
 }
 
 const _blockTags = {
@@ -91,7 +113,7 @@ void _walkChildren(
       if (i == pending.length - 1) t = t.trimRight();
       if (t.isEmpty) continue;
       final f = pending[i];
-      runs.add(InlineRun(t, flags: f.flags, ruby: f.ruby));
+      runs.add(InlineRun(t, flags: f.flags, ruby: f.ruby, refId: f.refId));
     }
     pending = <InlineRun>[];
     if (runs.any((r) => r.text.trim().isNotEmpty)) {
@@ -120,13 +142,27 @@ void _walkChildren(
         const {'img', 'image', 'br', 'svg', 'script', 'style'}.contains(tag);
     if (isBlock) {
       flush();
+      // 块级锚点：定位到该元素生成的下一个块（通常是它本身）的块首
+      _recordAnchor(child, ctx, 0);
       _walkBlock(child, ctx, quoteDepth: quoteDepth, listDepth: listDepth);
     } else {
+      // 行内锚点：定位到当前累积段落的块内偏移
+      _recordAnchor(child, ctx, _pendingLen(pending));
       pending.addAll(_inlineRuns(child));
     }
   }
   flush();
 }
+
+/// 记录元素 id 锚点位置（首个出现者优先；id 应唯一）
+void _recordAnchor(dom.Element el, _Ctx ctx, int charInBlock) {
+  final id = el.attributes['id'];
+  if (id == null || id.isEmpty || ctx.anchors.containsKey(id)) return;
+  ctx.anchors[id] = (ctx.blocks.length, charInBlock);
+}
+
+int _pendingLen(List<InlineRun> pending) =>
+    pending.fold(0, (s, r) => s + r.text.length);
 
 void _walkBlock(
   dom.Element node,
@@ -135,6 +171,25 @@ void _walkBlock(
   int listDepth = 0,
 }) {
   final tag = node.localName?.toLowerCase() ?? '';
+
+  // EPUB3 脚注/尾注容器：提取为脚注内容，不展开进正文流
+  // （否则注释文字会混入正文，且注标点击无内容可看）
+  final epubType =
+      (node.attributes['epub:type'] ?? node.attributes['type'] ?? '')
+          .toLowerCase();
+  final fid = node.attributes['id'];
+  if (fid != null &&
+      fid.isNotEmpty &&
+      (tag == 'aside' || tag == 'div' || tag == 'section') &&
+      (epubType.contains('footnote') ||
+          epubType.contains('rearnote') ||
+          epubType == 'note')) {
+    final text = _footnoteText(node);
+    if (text.isNotEmpty && !ctx.footnotes.containsKey(fid)) {
+      ctx.footnotes[fid] = Footnote(id: fid, text: text);
+    }
+    return;
+  }
 
   switch (tag) {
     case 'h1':
@@ -354,6 +409,43 @@ Block _listItemBlock(
 Block _paragraphOf(List<InlineRun> runs, int quoteDepth) =>
     Block(type: BlockType.paragraph, spans: runs, quoteDepth: quoteDepth);
 
+/// `<a>` 是否为注标：epub:type="noteref" 或 class 含 noteref/fnref 标识。
+/// 是则返回目标脚注 id（href 锚点，不含 #）；跨文件注标同样取其锚点，
+/// 内容在阅读器侧全书范围解析。
+String? _noterefTarget(dom.Element a) {
+  final epubType =
+      (a.attributes['epub:type'] ?? a.attributes['type'] ?? '').toLowerCase();
+  final cls = (a.attributes['class'] ?? '').toLowerCase();
+  final isNoteref =
+      epubType.contains('noteref') ||
+      cls.contains('noteref') ||
+      cls.contains('fnref') ||
+      cls.contains('footnote-ref') ||
+      cls.contains('footnoteref');
+  if (!isNoteref) return null;
+  final href = a.attributes['href'] ?? '';
+  final f = href.indexOf('#');
+  if (f < 0) return null;
+  final id = href.substring(f + 1).trim();
+  return id.isEmpty ? null : id;
+}
+
+/// 脚注容器纯文本：块级子元素各占一行（多段落以 \n 连接），
+/// 行内内容直接拼接。标签语义剥离，回链链接文本丢弃由纯文本合并承担。
+String _footnoteText(dom.Element node) {
+  final buf = StringBuffer();
+  for (final child in node.nodes) {
+    if (child is dom.Element &&
+        _blockTags.contains(child.localName?.toLowerCase())) {
+      final t = _inlineText(child).trim();
+      if (t.isNotEmpty) buf.write('$t\n');
+    } else if (child is dom.Text) {
+      buf.write(child.text.replaceAll('\u00a0', ' '));
+    }
+  }
+  return buf.toString().trim();
+}
+
 /// 递归提取行内文本（丢弃标签语义，保留文本）
 String _inlineText(dom.Node node) {
   final buf = StringBuffer();
@@ -373,7 +465,7 @@ String _inlineText(dom.Node node) {
   return buf.toString();
 }
 
-/// 递归提取行内 runs：保留 ruby 注音（EPUB 振假名），
+/// 递归提取行内 runs：保留 ruby 注音（EPUB 振假名）与注标（noteref），
 /// 其余行内标签样式降级为纯文本。
 List<InlineRun> _inlineRuns(dom.Node node) {
   if (node is dom.Text) {
@@ -383,6 +475,33 @@ List<InlineRun> _inlineRuns(dom.Node node) {
   if (node is! dom.Element) return const [];
   final tag = node.localName ?? '';
   if (tag == 'br') return const [InlineRun(' ')];
+  if (tag == 'a') {
+    // 注标：epub:type="noteref" 或 class 含 noteref/fnref 等
+    final refId = _noterefTarget(node);
+    if (refId != null) {
+      final inner = <InlineRun>[];
+      for (final c in node.nodes) {
+        inner.addAll(_inlineRuns(c));
+      }
+      final marked = <InlineRun>[];
+      for (final r in inner) {
+        if (r.text.isEmpty) continue;
+        marked.add(
+          InlineRun(
+            r.text,
+            flags: {...r.flags, InlineFlag.noteref},
+            ruby: r.ruby,
+            refId: refId,
+          ),
+        );
+      }
+      // 空注标（标记由 CSS ::before 生成）：渲染占位符保证可点
+      if (marked.isEmpty) {
+        marked.add(InlineRun('*', flags: const {InlineFlag.noteref}, refId: refId));
+      }
+      return marked;
+    }
+  }
   if (tag == 'img' || tag == 'image') {
     final src =
         node.attributes['src'] ??

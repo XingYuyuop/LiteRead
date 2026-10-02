@@ -77,8 +77,21 @@ class ReaderController extends Notifier<ReaderState> {
   final Map<int, LaidOutChapter> _lru = {};
   final Map<String, double> _imageAspects = {};
 
+  /// 排版代数：排版参数变更后递增；缓存章带代数标记，代数不符的重排。
+  /// 旧一代缓存保留显示（字号调整瞬间不白屏），新布局就绪后原位替换。
+  int _layoutGen = 0;
+  final Map<int, int> _lruGen = {};
+
+  /// 排版重排防抖：字号/行距等连续调整（滑块拖动、A+/A- 连点）时
+  /// 只在停顿后重排一次，避免每次变更都全章重新测量导致掉帧。
+  Timer? _repagDebounce;
+
   /// 阅读区尺寸（页面 Widget 布局后注入）
   Size _viewport = const Size(400, 700);
+
+  /// 有效边距（设置边距与系统安全区取大后注入）：
+  /// 分页（_buildConfig）与绘制（PageCanvas）共用，保证测/绘边界一致
+  EdgeInsets effectiveMargins = const EdgeInsets.fromLTRB(16, 24, 16, 24);
 
   /// 当前主题（测量时烘焙颜色；主题切换触发重排）
   ReaderThemeSpec? _activeSpec;
@@ -89,6 +102,11 @@ class ReaderController extends Notifier<ReaderState> {
   /// （慢解析的旧书异步回调覆盖新书的 state）。
   int _session = 0;
 
+  // ---- 阅读时长统计 ----
+  /// 本次计时起点；每 30 秒心跳落库一次（应用被杀最多丢 30 秒）
+  DateTime? _readingStart;
+  Timer? _readingTimer;
+
   @override
   ReaderState build() {
     ref.listen(readerSettingsProvider, (prev, next) {
@@ -98,6 +116,9 @@ class ReaderController extends Notifier<ReaderState> {
     });
     ref.onDispose(() {
       _saveDebounce?.cancel();
+      _repagDebounce?.cancel();
+      _readingTimer?.cancel();
+      _flushReadingTime();
       _saveProgressNow();
     });
     return const ReaderState();
@@ -111,7 +132,7 @@ class ReaderController extends Notifier<ReaderState> {
     if (viewport != null) _viewport = viewport;
     final session = ++_session;
 
-    // 换书前把上一本书的进度落盘（快照先取，避免状态被重置后丢失）
+    // 换书前把上一本书的进度与阅读时长落盘（快照先取，避免状态被重置后丢失）
     final prevBook = state.book;
     final prevLocator = currentLocator;
     final prevPercent = state.percent;
@@ -120,9 +141,11 @@ class ReaderController extends Notifier<ReaderState> {
         await _repo.saveProgress(prevBook.id, prevLocator, prevPercent);
       } catch (_) {}
     }
+    if (prevBook != null) await _flushReadingTime(bookId: prevBook.id);
     if (session != _session) return;
 
     _lru.clear();
+    _lruGen.clear();
     _imageAspects.clear();
     state = const ReaderState(loading: true);
 
@@ -140,6 +163,13 @@ class ReaderController extends Notifier<ReaderState> {
         document: output.document,
         loading: false,
         clearError: true,
+      );
+      // 开始计时：心跳每 30 秒把增量写入阅读时长表
+      _readingStart = DateTime.now();
+      _readingTimer?.cancel();
+      _readingTimer = Timer.periodic(
+        const Duration(seconds: 30),
+        (_) => _flushReadingTime(),
       );
       // 恢复进度
       final saved = await _repo.getProgress(bookId);
@@ -161,7 +191,7 @@ class ReaderController extends Notifier<ReaderState> {
     }
   }
 
-  /// 关闭阅读器（回书架前保存进度）。
+  /// 关闭阅读器（回书架前保存进度与阅读时长）。
   /// 先同步清空状态再异步落盘：保证下一本书打开时绝看不到上一本的内容。
   Future<void> close() async {
     _session++;
@@ -169,7 +199,13 @@ class ReaderController extends Notifier<ReaderState> {
     final locator = currentLocator;
     final percent = state.percent;
     _saveDebounce?.cancel();
+    _repagDebounce?.cancel();
+    _readingTimer?.cancel();
+    _readingTimer = null;
+    await _flushReadingTime(bookId: book?.id, keepClock: false);
+    _readingStart = null;
     _lru.clear();
+    _lruGen.clear();
     state = const ReaderState();
     if (book != null && locator != null) {
       try {
@@ -180,14 +216,13 @@ class ReaderController extends Notifier<ReaderState> {
 
   // ---- 视口 ----
 
-  void updateViewport(Size size) {
-    if (size == _viewport || size.width < 40 || size.height < 40) return;
-    final offset = currentCharOffset;
+  void updateViewport(Size size, EdgeInsets margins) {
+    final changed = size != _viewport || margins != effectiveMargins;
+    if (!changed || size.width < 40 || size.height < 40) return;
     _viewport = size;
-    _lru.clear();
-    if (state.document != null) {
-      _repaginateCurrent(restoreChar: offset ?? 0);
-    }
+    effectiveMargins = margins;
+    // 视口变化等同排版变更：走防抖重排，旧布局保留显示避免闪烁
+    _scheduleRepaginate();
   }
 
   // ---- 定位 ----
@@ -301,7 +336,8 @@ class ReaderController extends Notifier<ReaderState> {
   // ---- 分页 ----
 
   Future<LaidOutChapter?> _getLaidChapter(int index) async {
-    if (_lru.containsKey(index)) return _lru[index];
+    final cached = _lru[index];
+    if (cached != null && _lruGen[index] == _layoutGen) return cached;
     final doc = state.document;
     if (doc == null || index >= doc.spine.length) return null;
 
@@ -316,6 +352,7 @@ class ReaderController extends Notifier<ReaderState> {
       imageAspects: _imageAspects,
     );
     _lru[index] = laid;
+    _lruGen[index] = _layoutGen;
     return laid;
   }
 
@@ -326,8 +363,8 @@ class ReaderController extends Notifier<ReaderState> {
       lineHeight: s.lineHeight,
       letterSpacing: s.letterSpacing,
       paragraphSpacing: s.paragraphSpacing,
-      contentWidth: _viewport.width - s.margins.horizontal,
-      contentHeight: _viewport.height - s.margins.vertical,
+      contentWidth: _viewport.width - effectiveMargins.horizontal,
+      contentHeight: _viewport.height - effectiveMargins.vertical,
       indentChars: s.indentChars,
       justify: s.justify,
       fontFamily: s.fontFamily,
@@ -352,11 +389,7 @@ class ReaderController extends Notifier<ReaderState> {
         (prev.foreground != spec.foreground ||
             prev.accent != spec.accent ||
             prev.secondary != spec.secondary)) {
-      final offset = currentCharOffset ?? 0;
-      _lru.clear();
-      if (state.document != null) {
-        await _repaginateCurrent(restoreChar: offset);
-      }
+      _scheduleRepaginate();
     }
   }
 
@@ -395,6 +428,7 @@ class ReaderController extends Notifier<ReaderState> {
           ),
         );
       _lru.remove(keys.last);
+      _lruGen.remove(keys.last);
     }
   }
 
@@ -426,11 +460,20 @@ class ReaderController extends Notifier<ReaderState> {
         prev.fontFamily != next.fontFamily ||
         prev.contentWidthScale != next.contentWidthScale;
     if (!affectsLayout) return;
-    final offset = currentCharOffset ?? 0;
-    _lru.clear();
-    if (state.document != null) {
+    // 防抖：连续调整（滑块拖动/A±连点）只在停顿 200ms 后重排一次，
+    // 期间旧布局继续显示（无白屏），保证调整过程不掉帧
+    _scheduleRepaginate();
+  }
+
+  /// 防抖触发保位重排：递增排版代数使旧缓存失效，但保留旧布局供显示
+  void _scheduleRepaginate() {
+    _repagDebounce?.cancel();
+    _repagDebounce = Timer(const Duration(milliseconds: 200), () {
+      if (state.document == null) return;
+      _layoutGen++;
+      final offset = currentCharOffset ?? 0;
       _repaginateCurrent(restoreChar: offset);
-    }
+    });
   }
 
   Future<void> _repaginateCurrent({required int restoreChar}) async {
@@ -463,6 +506,26 @@ class ReaderController extends Notifier<ReaderState> {
       await _repo.saveProgress(book.id, locator, state.percent);
     } catch (_) {
       // 进度保存失败不阻塞阅读
+    }
+  }
+
+  // ---- 阅读时长 ----
+
+  /// 结算自上次心跳以来的阅读时长写入统计表。
+  /// [bookId] 缺省取当前书；[keepClock] 为 false 时结算后不重置起点（退出场景）。
+  Future<void> _flushReadingTime({String? bookId, bool keepClock = true}) async {
+    final start = _readingStart;
+    if (start == null) return;
+    final id = bookId ?? state.book?.id;
+    if (id == null) return;
+    if (keepClock) _readingStart = DateTime.now();
+    // 单次结算上限 5 分钟：防止休眠唤醒后一次性计入过长时长
+    final secs = DateTime.now().difference(start).inSeconds.clamp(0, 300);
+    if (secs <= 0) return;
+    try {
+      await _repo.addReadingTime(id, secs);
+    } catch (_) {
+      // 统计失败不影响阅读
     }
   }
 

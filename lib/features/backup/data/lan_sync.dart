@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:drift/drift.dart' hide isNull;
 
 import '../../../core/storage/app_database.dart';
@@ -10,6 +11,44 @@ import 'remote_store.dart';
 
 /// 局域网同步服务端口（发现 UDP 与 HTTP 服务共用同一端口段约定）
 const lanSyncPort = 47816;
+
+/// WiFi 传书统计（浏览器上传进度），UI 通过 ValueNotifier 监听
+class LanTransferStats {
+  const LanTransferStats({this.received = 0, this.lastTitle});
+
+  /// 本次开启以来已接收书籍数（含重复）
+  final int received;
+
+  /// 最近一次接收的书名
+  final String? lastTitle;
+}
+
+/// 本机局域网 IPv4 地址（排除回环与虚拟网卡），用于展示传书网址
+Future<List<String>> localIPv4Addresses() async {
+  final out = <String>[];
+  try {
+    for (final ni in await NetworkInterface.list()) {
+      final n = ni.name.toLowerCase();
+      final virtual =
+          n.contains('vethernet') ||
+          n.contains('virtualbox') ||
+          n.contains('vmware') ||
+          n.contains('loopback') ||
+          n.contains('wsl') ||
+          n.contains('tap') ||
+          n.contains('tun') ||
+          n.contains('hamachi') ||
+          n.contains('hyper-v');
+      if (virtual) continue;
+      for (final a in ni.addresses) {
+        if (a.type == InternetAddressType.IPv4 && !a.isLoopback) {
+          out.add(a.address);
+        }
+      }
+    }
+  } catch (_) {}
+  return out;
+}
 
 /// 局域网设备信息
 class LanDevice {
@@ -27,10 +66,12 @@ class LanDevice {
 /// 局域网同步服务端：开放 HTTP 端口，供其他 LiteRead 设备扫描/拉取/推送。
 ///
 /// 端点（均限定本应用）：
+/// - GET  /             → WiFi 传书网页（PC 浏览器上传书籍）
 /// - GET  /api/ping      → {"app","name","port"}
 /// - GET  /api/manifest  → 备份清单（设置+书籍清单）
 /// - GET  /api/list?path=book|progress|covers|'' → 文件相对路径列表
 /// - GET  /api/file?path=`book/<id>.<ext>` 等 → 文件内容
+/// - POST /api/upload?name=<文件名> → WiFi 传书上传（原始字节流）
 /// - POST /api/register  → 注册书籍元数据行（body: 清单书籍条目 JSON）
 /// - POST /api/file?path=... → 上传文件内容
 class LanSyncServer {
@@ -41,6 +82,11 @@ class LanSyncServer {
 
   HttpServer? _server;
   RawDatagramSocket? _udp;
+
+  /// WiFi 传书状态（浏览器每上传一本更新一次）
+  final transferStats = ValueNotifier<LanTransferStats>(
+    const LanTransferStats(),
+  );
 
   bool get running => _server != null;
 
@@ -111,6 +157,17 @@ class LanSyncServer {
   Future<void> _handleRequest(HttpRequest req) async {
     try {
       final path = req.uri.path;
+      if (path == '/' || path == '/index.html') {
+        // WiFi 传书网页（PC/手机浏览器直接访问）
+        req.response.headers.contentType = ContentType.html;
+        req.response.add(utf8.encode(_uploadPageHtml));
+        await req.response.close();
+        return;
+      }
+      if (path == '/api/upload' && req.method == 'POST') {
+        await _handleUpload(req);
+        return;
+      }
       if (path == '/api/ping') {
         await _json(req, {
           'app': 'literead',
@@ -175,6 +232,48 @@ class LanSyncServer {
       try {
         req.response.statusCode = 500;
         await req.response.close();
+      } catch (_) {}
+    }
+  }
+
+  /// WiFi 传书上传：原始字节流 → 临时文件 → 走标准导入管线
+  /// （流式哈希去重 / 解析 / 托管副本 / 封面 / 入库）
+  Future<void> _handleUpload(HttpRequest req) async {
+    final name = req.uri.queryParameters['name'] ?? 'book.bin';
+    // 文件名安全化：仅保留基础名，防路径穿越
+    final safeName = name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
+    final ext = safeName.contains('.')
+        ? safeName.split('.').last.toLowerCase()
+        : '';
+    const supported = {'epub', 'txt', 'mobi', 'azw3', 'pdf', 'fb2', 'cbz'};
+    if (!supported.contains(ext)) {
+      await _json(req, {'ok': false, 'error': '不支持的格式：$ext'});
+      return;
+    }
+    final tmpDir = await Directory.systemTemp.createTemp('literead_up');
+    final tmp = File(
+      '${tmpDir.path}${Platform.pathSeparator}up.$ext',
+    );
+    try {
+      final sink = tmp.openWrite();
+      await req.cast<List<int>>().pipe(sink);
+      final outcome = await _repo.importFile(tmp.path);
+      final stats = transferStats.value;
+      transferStats.value = LanTransferStats(
+        received: stats.received + 1,
+        lastTitle: outcome.book.title,
+      );
+      await _json(req, {
+        'ok': true,
+        'title': outcome.book.title,
+        'duplicated': outcome.duplicated,
+      });
+    } catch (e) {
+      await _json(req, {'ok': false, 'error': e.toString()});
+    } finally {
+      try {
+        if (await tmp.exists()) await tmp.delete();
+        await tmpDir.delete(recursive: true);
       } catch (_) {}
     }
   }
@@ -360,6 +459,80 @@ class LanSyncServer {
   }
 }
 
+/// WiFi 传书网页：PC 浏览器访问 `http://<设备IP>:<端口>` 直接上传书籍。
+/// 上传用 XHR 原始字节流（POST /api/upload?name=），可读进度百分比。
+const _uploadPageHtml = r'''<!DOCTYPE html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LiteRead · WiFi 传书</title>
+<style>
+:root{--acc:#FF7A1A;--bg:#F6F6F4;--card:#FFFFFF;--tx:#26221E;--sub:#8A8378}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;color:var(--tx);
+min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+.card{background:var(--card);border-radius:20px;box-shadow:0 8px 32px rgba(0,0,0,.08);
+padding:36px 32px;width:100%;max-width:420px;text-align:center}
+h1{font-size:20px;margin-bottom:4px}
+.wifi{width:64px;height:64px;margin:18px auto 10px;border-radius:50%;background:#FFF3E8;
+display:flex;align-items:center;justify-content:center}
+.tip{color:var(--sub);font-size:13px;line-height:1.7;margin:14px 0 18px}
+#pick{display:none}
+.btn{display:inline-block;background:var(--acc);color:#fff;border:none;border-radius:24px;
+padding:12px 34px;font-size:15px;cursor:pointer}
+.btn:active{opacity:.85}
+.btn[disabled]{opacity:.4;cursor:default}
+ul{list-style:none;margin-top:18px;text-align:left;max-height:220px;overflow:auto}
+li{padding:8px 2px;font-size:13px;border-bottom:1px solid #F0EDE8;display:flex;justify-content:space-between;gap:8px}
+li .st{color:var(--sub);white-space:nowrap}
+li .st.ok{color:#2AA952}.st.dup{color:var(--acc)}.st.err{color:#D93025}
+.bar{height:3px;background:#F0EDE8;border-radius:2px;margin-top:6px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--acc);width:0}
+</style></head><body>
+<div class="card">
+  <h1>WiFi 传书</h1>
+  <div class="wifi">
+    <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#FF7A1A" stroke-width="2" stroke-linecap="round">
+      <path d="M2.5 8.5a15 15 0 0 1 19 0"/><path d="M5.5 12a11 11 0 0 1 13 0"/>
+      <path d="M8.5 15.5a7 7 0 0 1 7 0"/><circle cx="12" cy="19" r="1.4" fill="#FF7A1A" stroke="none"/>
+    </svg>
+  </div>
+  <div style="font-size:14px">选择书籍文件，通过局域网发送到本设备</div>
+  <p class="tip">支持 EPUB / TXT / MOBI / AZW3 / PDF / FB2 / CBZ<br>发送后书籍会自动出现在书架中</p>
+  <label class="btn" id="pickBtn">选择文件</label>
+  <input type="file" id="pick" multiple accept=".epub,.txt,.mobi,.azw3,.pdf,.fb2,.cbz">
+  <ul id="list"></ul>
+</div>
+<script>
+const pick=document.getElementById('pick'),btn=document.getElementById('pickBtn'),list=document.getElementById('list');
+btn.onclick=()=>pick.click();
+pick.onchange=()=>{for(const f of pick.files)send(f);pick.value='';};
+function send(f){
+  const li=document.createElement('li');
+  li.innerHTML='<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span><span class="st">0%</span><div class="bar" style="position:absolute"></div>';
+  const nameEl=li.firstChild,stEl=li.querySelector('.st');
+  nameEl.textContent=f.name;
+  const bar=document.createElement('div');bar.className='bar';bar.innerHTML='<i></i>';
+  li.appendChild(bar);list.prepend(li);
+  const fill=bar.firstChild;
+  const xhr=new XMLHttpRequest();
+  xhr.open('POST','/api/upload?name='+encodeURIComponent(f.name));
+  xhr.setRequestHeader('Content-Type','application/octet-stream');
+  xhr.upload.onprogress=e=>{if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);
+    stEl.textContent=p+'%';fill.style.width=p+'%';}};
+  xhr.onload=()=>{
+    fill.style.width='100%';bar.remove();
+    try{const r=JSON.parse(xhr.responseText);
+      if(r.ok){stEl.textContent=r.duplicated?'书架已有':'已接收';stEl.className='st '+(r.duplicated?'dup':'ok');}
+      else{stEl.textContent=r.error||'失败';stEl.className='st err';}
+    }catch(_){stEl.textContent='失败';stEl.className='st err';}
+  };
+  xhr.onerror=()=>{stEl.textContent='网络错误';stEl.className='st err';bar.remove();};
+  xhr.send(f);
+}
+</script>
+</body></html>''';
+
 /// 局域网设备扫描：优先 UDP 广播发现，失败时回退 TCP 端口扫描本网段
 class LanScanner {
   /// 扫描局域网设备（约 3 秒超时）
@@ -378,9 +551,38 @@ class LanScanner {
     return devices.values.toList();
   }
 
+  /// 本机全部 IPv4 地址（含回环）：扫描结果中据此过滤自身，
+  /// 避免广播环回导致本机以多个 IP 出现在设备列表
+  static Future<Set<String>> _localIPv4s() async {
+    final out = <String>{'127.0.0.1'};
+    try {
+      for (final ni in await NetworkInterface.list()) {
+        for (final a in ni.addresses) {
+          if (a.type == InternetAddressType.IPv4) out.add(a.address);
+        }
+      }
+    } catch (_) {}
+    return out;
+  }
+
+  /// 是否虚拟/回环网卡（WSL、虚拟机、VPN TAP 等，子网内不会有同步设备）
+  static bool _isVirtualInterface(String name) {
+    final n = name.toLowerCase();
+    return n.contains('vethernet') ||
+        n.contains('virtualbox') ||
+        n.contains('vmware') ||
+        n.contains('loopback') ||
+        n.contains('wsl') ||
+        n.contains('tap') ||
+        n.contains('tun') ||
+        n.contains('hamachi') ||
+        n.contains('hyper-v');
+  }
+
   /// UDP 广播发现
   static Future<List<LanDevice>> _udpScan() async {
     final out = <LanDevice>[];
+    final localIps = await _localIPv4s();
     RawDatagramSocket? socket;
     try {
       socket = await RawDatagramSocket.bind(
@@ -392,6 +594,7 @@ class LanScanner {
       // 本机所有网段的广播地址
       final addrs = <String>{'255.255.255.255'};
       for (final ni in await NetworkInterface.list()) {
+        if (_isVirtualInterface(ni.name)) continue;
         for (final a in ni.addresses) {
           if (a.type != InternetAddressType.IPv4) continue;
           final parts = a.address.split('.');
@@ -408,6 +611,8 @@ class LanScanner {
         if (event != RawSocketEvent.read) return;
         final dg = socket!.receive();
         if (dg == null) return;
+        // 过滤自身应答（广播环回）
+        if (localIps.contains(dg.address.address)) return;
         try {
           final j =
               jsonDecode(utf8.decode(dg.data, allowMalformed: true))
@@ -439,26 +644,27 @@ class LanScanner {
   /// TCP 逐 IP 端口扫描本机所在 /24 网段（回退方案）
   static Future<List<LanDevice>> _tcpScan() async {
     final out = <LanDevice>[];
-    String? localIp;
+    final localIps = await _localIPv4s();
+
+    // 收集全部物理网卡的 /24 网段前缀（排除虚拟网卡，网段去重）
+    final prefixes = <String>{};
     try {
-      final interfaces = await NetworkInterface.list();
-      for (final ni in interfaces) {
+      for (final ni in await NetworkInterface.list()) {
+        if (_isVirtualInterface(ni.name)) continue;
         for (final a in ni.addresses) {
-          if (a.type == InternetAddressType.IPv4 && !a.isLoopback) {
-            localIp = a.address;
-            break;
-          }
+          if (a.type != InternetAddressType.IPv4 || a.isLoopback) continue;
+          final parts = a.address.split('.');
+          if (parts.length != 4) continue;
+          prefixes.add('${parts[0]}.${parts[1]}.${parts[2]}');
         }
-        if (localIp != null) break;
       }
     } catch (_) {}
-    if (localIp == null) return out;
-    final parts = localIp.split('.');
-    final prefix = '${parts[0]}.${parts[1]}.${parts[2]}';
+    if (prefixes.isEmpty) return out;
 
     final candidates = <String>[
-      for (var i = 1; i <= 254; i++)
-        if ('$prefix.$i' != localIp) '$prefix.$i',
+      for (final prefix in prefixes)
+        for (var i = 1; i <= 254; i++)
+          if (!localIps.contains('$prefix.$i')) '$prefix.$i',
     ];
 
     var index = 0;
@@ -472,7 +678,7 @@ class LanScanner {
       }
     }
 
-    await Future.wait([for (var i = 0; i < 32; i++) worker()]);
+    await Future.wait([for (var i = 0; i < 64; i++) worker()]);
     return out;
   }
 

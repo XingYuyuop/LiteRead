@@ -22,6 +22,12 @@ class _BackupPageState extends ConsumerState<BackupPage> {
   BackupConfig _cfg = const BackupConfig();
   bool _busy = false;
   String _busyText = '';
+
+  // ---- 操作进度（t10：进度动画 + 百分比） ----
+  int _opDone = 0;
+  int _opTotal = 0;
+  String _opPhase = '';
+
   bool _scanning = false;
   List<LanDevice> _devices = const [];
   bool _sharing = false;
@@ -147,18 +153,44 @@ class _BackupPageState extends ConsumerState<BackupPage> {
 
   // ---- 操作 ----
 
+  /// 进度回调：同步操作步数到状态（含百分比），驱动进度条动画
+  BackupProgressCallback get _onProgress => (done, total, phase) {
+    if (!mounted) return;
+    setState(() {
+      _opDone = done;
+      _opTotal = total;
+      _opPhase = phase;
+    });
+  };
+
+  void _resetProgress() {
+    _opDone = 0;
+    _opTotal = 0;
+    _opPhase = '';
+  }
+
   Future<void> _runOp(
     String title,
-    Future<BackupResult> Function(BackupService, RemoteStore) op,
+    Future<BackupResult> Function(
+      BackupService,
+      RemoteStore,
+      BackupProgressCallback,
+    )
+    op,
   ) async {
     final store = _safeStore();
     if (store == null) return;
     setState(() {
       _busy = true;
       _busyText = title;
+      _resetProgress();
     });
     try {
-      final r = await op(ref.read(backupServiceProvider), store);
+      final r = await op(
+        ref.read(backupServiceProvider),
+        store,
+        _onProgress,
+      );
       _toast('${r.summary()}（$title完成）');
     } catch (e) {
       _toast('$title失败：$e');
@@ -193,7 +225,7 @@ class _BackupPageState extends ConsumerState<BackupPage> {
       }
       final r = await ref
           .read(backupServiceProvider)
-          .restore(store, manifestName: name);
+          .restore(store, manifestName: name, onProgress: _onProgress);
       _toast('恢复完成：${r.summary()}');
     } catch (e) {
       _toast('恢复失败：$e');
@@ -335,6 +367,7 @@ class _BackupPageState extends ConsumerState<BackupPage> {
     setState(() {
       _busy = true;
       _busyText = '正在与 ${d.name} 同步…';
+      _resetProgress();
     });
     try {
       final r = await svc.applyLanDiff(
@@ -344,6 +377,7 @@ class _BackupPageState extends ConsumerState<BackupPage> {
         push: plan.push,
         deleteLocalIds: plan.deleteLocalIds.toList(),
         deleteRemoteIds: plan.deleteRemoteIds.toList(),
+        onProgress: _onProgress,
       );
       _toast('同步完成：${r.summary()}');
     } catch (e) {
@@ -525,10 +559,32 @@ class _BackupPageState extends ConsumerState<BackupPage> {
         padding: const EdgeInsets.only(bottom: 32),
         children: [
           if (_busy) ...[
-            LinearProgressIndicator(minHeight: 2),
+            // 进度条：已知总步数时显示确定进度与百分比，否则走动画
+            LinearProgressIndicator(
+              minHeight: 3,
+              value: _opTotal > 0 ? (_opDone / _opTotal).clamp(0.0, 1.0) : null,
+            ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-              child: Text(_busyText, style: TextStyle(color: cs.primary)),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      _opPhase.isNotEmpty ? _opPhase : _busyText,
+                      style: TextStyle(color: cs.primary),
+                    ),
+                  ),
+                  if (_opTotal > 0)
+                    Text(
+                      '${(_opDone / _opTotal * 100).toStringAsFixed(0)}%'
+                      ' · $_opDone/$_opTotal',
+                      style: TextStyle(
+                        color: cs.primary,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                ],
+              ),
             ),
           ],
           const _SectionHeader('存储文件夹'),
@@ -583,7 +639,10 @@ class _BackupPageState extends ConsumerState<BackupPage> {
                 FilledButton.icon(
                   onPressed: _busy
                       ? null
-                      : () => _runOp('备份', (svc, s) => svc.backup(s)),
+                      : () => _runOp(
+                          '备份',
+                          (svc, s, cb) => svc.backup(s, onProgress: cb),
+                        ),
                   icon: const Icon(Icons.upload_outlined),
                   label: const Text('立即备份'),
                 ),
@@ -591,7 +650,10 @@ class _BackupPageState extends ConsumerState<BackupPage> {
                 FilledButton.tonalIcon(
                   onPressed: _busy
                       ? null
-                      : () => _runOp('同步', (svc, s) => svc.sync(s)),
+                      : () => _runOp(
+                          '同步',
+                          (svc, s, cb) => svc.sync(s, onProgress: cb),
+                        ),
                   icon: const Icon(Icons.sync_outlined),
                   label: const Text('同步（自动检索差异）'),
                 ),

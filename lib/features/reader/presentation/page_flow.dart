@@ -649,10 +649,14 @@ class _PageFlowState extends State<PageFlow>
 
   void _handleTapUp(TapUpDetails d) {
     if (!widget.enabled || _ctrl.isAnimating || _dragging) return;
-    // 选择批注期间：点按仅用于清除选择，不翻页/不弹菜单
-    if (widget.selecting) return;
     final w = context.size?.width ?? 1;
     final x = d.localPosition.dx;
+    // 批注选择/编辑态：任意区域点按都交给外层处理——
+    // 点在操作条外=清除选择状态，实现「点击其他区域自动关闭」
+    if (widget.selecting) {
+      widget.onTapCenter?.call(d.localPosition);
+      return;
+    }
     if (x < w * 0.3) {
       _turn(widget.onPrev, -1);
     } else if (x > w * 0.7) {
@@ -664,8 +668,6 @@ class _PageFlowState extends State<PageFlow>
 
   void _onDragStart(DragStartDetails _) {
     if (!widget.enabled || _ctrl.isAnimating) return;
-    // 「无」动画模式：禁用滑动翻页，仅允许点击翻页
-    if (widget.animType == PageTurnType.none) return;
     _dragging = true;
     _dragDx = 0;
     _dragT = 0;
@@ -680,6 +682,20 @@ class _PageFlowState extends State<PageFlow>
     // 修复旧实现「反向即翻转方向并镜像进度」导致的幅度突跳
     _dragDx += d.delta.dx;
     final pos = -_dragDx / w; // 向左滑 → 正（下一页）
+    if (widget.animType == PageTurnType.none) {
+      // 「无」动画模式：只记录手势轨迹用于翻页判定，不触发重绘，
+      // 保证滑动翻页在禁用动画时依然即时响应（60fps 无压力）
+      if (pos > 0) {
+        _direction = 1;
+        _dragT = pos.clamp(0.0, 1.0);
+      } else if (pos < 0) {
+        _direction = -1;
+        _dragT = (-pos).clamp(0.0, 1.0);
+      } else {
+        _dragT = 0;
+      }
+      return;
+    }
     setState(() {
       if (pos > 0) {
         _direction = 1;
@@ -704,10 +720,20 @@ class _PageFlowState extends State<PageFlow>
         : false;
     final t = _dragT;
     _dragT = 0;
+    _dragDx = 0;
+
+    // 「无」动画模式：滑动达到阈值后即时翻页（无过渡动画、无弹回帧）
+    if (widget.animType == PageTurnType.none) {
+      if (shouldTurn) {
+        final ok = await (_direction == 1 ? widget.onNext() : widget.onPrev());
+        if (ok && mounted) setState(() {});
+      }
+      return;
+    }
 
     if (shouldTurn) {
       // 从当前拖拽进度继续动画到 1
-      if (_outgoing == null && widget.animType != PageTurnType.none) {
+      if (_outgoing == null) {
         final old = widget.buildPage();
         final ok = await (_direction == 1 ? widget.onNext() : widget.onPrev());
         if (ok && mounted) {
@@ -751,7 +777,7 @@ class _PageFlowState extends State<PageFlow>
             if (!hasOutgoing && t == 0) {
               return RepaintBoundary(child: widget.buildPage());
             }
-            if (!hasOutgoing && _dragging) {
+            if (!hasOutgoing && _dragging && widget.animType != PageTurnType.none) {
               // 拖拽反馈：当前页跟手平移（peek），邻页未排版时无对接页。
               // RepaintBoundary 放在 Transform 内层：平移只改图层偏移，
               // 不触发整页重绘（修复桌面端长按拖动的卡顿）。
@@ -798,6 +824,7 @@ class _StackPages extends StatelessWidget {
     if (old == null || type == PageTurnType.none) return current;
     switch (type) {
       case PageTurnType.slide:
+        // 平移：双页同步位移（经典 push）——新页从侧面推入，旧页被推出
         return Stack(
           children: [
             Positioned.fill(
@@ -815,8 +842,8 @@ class _StackPages extends StatelessWidget {
           ],
         );
       case PageTurnType.cover:
-        // 覆盖翻页：下一页 = 新页从侧边滑入盖在旧页上；
-        // 上一页 = 旧页向侧边滑出、露出下方的新页（与阅读类应用一致）
+        // 覆盖：底层页完全静止，顶层页带阴影滑入/滑出盖住——
+        // 与平移的差别：下层不跟随移动 + 前导边缘投影
         final topPage = dir > 0 ? current : old;
         final underPage = dir > 0 ? old : current;
         final topOffset = dir > 0 ? (1 - t) * width : t * width;
@@ -829,21 +856,134 @@ class _StackPages extends StatelessWidget {
                 child: RepaintBoundary(child: topPage),
               ),
             ),
+            // 前导边缘阴影（随滑动收敛），强化「覆盖」层次感
+            Positioned(
+              left: dir > 0 ? topOffset - 24 : topOffset,
+              width: 24,
+              top: 0,
+              bottom: 0,
+              child: IgnorePointer(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: dir > 0 ? Alignment.centerRight : Alignment.centerLeft,
+                      end: dir > 0 ? Alignment.centerLeft : Alignment.centerRight,
+                      colors: [
+                        Colors.black.withValues(alpha: 0.30 * (1 - t)),
+                        Colors.transparent,
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
           ],
         );
       case PageTurnType.fade:
+        // 淡入：交叉淡化 + 新页轻微缩放浮入——与覆盖/平移的纯位移明显不同
         return Stack(
           children: [
+            Positioned.fill(child: Opacity(opacity: 1 - t, child: old)),
             Positioned.fill(
-              child: Opacity(opacity: 1 - t, child: old),
-            ),
-            Positioned.fill(
-              child: Opacity(opacity: t, child: current),
+              child: Opacity(
+                opacity: t,
+                child: Transform.scale(
+                  scale: 0.96 + 0.04 * t,
+                  child: current,
+                ),
+              ),
             ),
           ],
         );
       case PageTurnType.none:
         return current;
     }
+  }
+}
+
+/// 翻页动画预览：迷你页面按当前选中动画循环演示，供设置面板直观对比
+class PageAnimPreview extends StatefulWidget {
+  const PageAnimPreview({super.key, required this.type});
+
+  final PageTurnType type;
+
+  @override
+  State<PageAnimPreview> createState() => _PageAnimPreviewState();
+}
+
+class _PageAnimPreviewState extends State<PageAnimPreview>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 700),
+  );
+  int _dir = 1;
+
+  @override
+  void initState() {
+    super.initState();
+    _loop();
+  }
+
+  Future<void> _loop() async {
+    await Future<void>.delayed(const Duration(milliseconds: 1100));
+    if (!mounted) return;
+    if (widget.type == PageTurnType.none) {
+      // 无动画：跳变演示
+      _dir = -_dir;
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      if (mounted) _loop();
+      return;
+    }
+    _dir = -_dir;
+    await _ctrl.forward(from: 0);
+    if (mounted) _loop();
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  Widget _miniPage(int n, Color bg, Color fg) => Container(
+    color: bg,
+    alignment: Alignment.center,
+    child: Text(
+      '$n',
+      style: TextStyle(fontSize: 28, fontWeight: FontWeight.w600, color: fg),
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (context, _) => LayoutBuilder(
+        builder: (context, bc) {
+          final width = bc.maxWidth;
+          final t = widget.type == PageTurnType.none
+              ? ((_ctrl.value > 0.5) ? 1.0 : 0.0)
+              : _ctrl.value;
+          Widget page() => _miniPage(2, cs.surfaceContainerHighest, cs.primary);
+          Widget oldPage() => _miniPage(1, cs.surfaceContainerHigh, cs.onSurface);
+          return ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: SizedBox(
+              height: 92,
+              child: _StackPages(
+                current: page(),
+                outgoing: oldPage(),
+                t: t,
+                dir: _dir,
+                type: widget.type,
+                width: width,
+              ),
+            ),
+          );
+        },
+      ),
+    );
   }
 }

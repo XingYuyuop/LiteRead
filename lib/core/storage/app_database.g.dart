@@ -2485,6 +2485,266 @@ class SettingsKvCompanion extends UpdateCompanion<SettingsKvData> {
   }
 }
 
+class $ReadingTimesTable extends ReadingTimes
+    with TableInfo<$ReadingTimesTable, ReadingTime> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $ReadingTimesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _bookIdMeta = const VerificationMeta('bookId');
+  @override
+  late final GeneratedColumn<String> bookId = GeneratedColumn<String>(
+    'book_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _dayMeta = const VerificationMeta('day');
+  @override
+  late final GeneratedColumn<String> day = GeneratedColumn<String>(
+    'day',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _secondsMeta = const VerificationMeta(
+    'seconds',
+  );
+  @override
+  late final GeneratedColumn<int> seconds = GeneratedColumn<int>(
+    'seconds',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  @override
+  List<GeneratedColumn> get $columns => [bookId, day, seconds];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'reading_times';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<ReadingTime> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('book_id')) {
+      context.handle(
+        _bookIdMeta,
+        bookId.isAcceptableOrUnknown(data['book_id']!, _bookIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_bookIdMeta);
+    }
+    if (data.containsKey('day')) {
+      context.handle(
+        _dayMeta,
+        day.isAcceptableOrUnknown(data['day']!, _dayMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_dayMeta);
+    }
+    if (data.containsKey('seconds')) {
+      context.handle(
+        _secondsMeta,
+        seconds.isAcceptableOrUnknown(data['seconds']!, _secondsMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {bookId, day};
+  @override
+  ReadingTime map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return ReadingTime(
+      bookId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}book_id'],
+      )!,
+      day: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}day'],
+      )!,
+      seconds: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}seconds'],
+      )!,
+    );
+  }
+
+  @override
+  $ReadingTimesTable createAlias(String alias) {
+    return $ReadingTimesTable(attachedDatabase, alias);
+  }
+}
+
+class ReadingTime extends DataClass implements Insertable<ReadingTime> {
+  final String bookId;
+  final String day;
+  final int seconds;
+  const ReadingTime({
+    required this.bookId,
+    required this.day,
+    required this.seconds,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['book_id'] = Variable<String>(bookId);
+    map['day'] = Variable<String>(day);
+    map['seconds'] = Variable<int>(seconds);
+    return map;
+  }
+
+  ReadingTimesCompanion toCompanion(bool nullToAbsent) {
+    return ReadingTimesCompanion(
+      bookId: Value(bookId),
+      day: Value(day),
+      seconds: Value(seconds),
+    );
+  }
+
+  factory ReadingTime.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return ReadingTime(
+      bookId: serializer.fromJson<String>(json['bookId']),
+      day: serializer.fromJson<String>(json['day']),
+      seconds: serializer.fromJson<int>(json['seconds']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'bookId': serializer.toJson<String>(bookId),
+      'day': serializer.toJson<String>(day),
+      'seconds': serializer.toJson<int>(seconds),
+    };
+  }
+
+  ReadingTime copyWith({String? bookId, String? day, int? seconds}) =>
+      ReadingTime(
+        bookId: bookId ?? this.bookId,
+        day: day ?? this.day,
+        seconds: seconds ?? this.seconds,
+      );
+  ReadingTime copyWithCompanion(ReadingTimesCompanion data) {
+    return ReadingTime(
+      bookId: data.bookId.present ? data.bookId.value : this.bookId,
+      day: data.day.present ? data.day.value : this.day,
+      seconds: data.seconds.present ? data.seconds.value : this.seconds,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ReadingTime(')
+          ..write('bookId: $bookId, ')
+          ..write('day: $day, ')
+          ..write('seconds: $seconds')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(bookId, day, seconds);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is ReadingTime &&
+          other.bookId == this.bookId &&
+          other.day == this.day &&
+          other.seconds == this.seconds);
+}
+
+class ReadingTimesCompanion extends UpdateCompanion<ReadingTime> {
+  final Value<String> bookId;
+  final Value<String> day;
+  final Value<int> seconds;
+  final Value<int> rowid;
+  const ReadingTimesCompanion({
+    this.bookId = const Value.absent(),
+    this.day = const Value.absent(),
+    this.seconds = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  ReadingTimesCompanion.insert({
+    required String bookId,
+    required String day,
+    this.seconds = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : bookId = Value(bookId),
+       day = Value(day);
+  static Insertable<ReadingTime> custom({
+    Expression<String>? bookId,
+    Expression<String>? day,
+    Expression<int>? seconds,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (bookId != null) 'book_id': bookId,
+      if (day != null) 'day': day,
+      if (seconds != null) 'seconds': seconds,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  ReadingTimesCompanion copyWith({
+    Value<String>? bookId,
+    Value<String>? day,
+    Value<int>? seconds,
+    Value<int>? rowid,
+  }) {
+    return ReadingTimesCompanion(
+      bookId: bookId ?? this.bookId,
+      day: day ?? this.day,
+      seconds: seconds ?? this.seconds,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (bookId.present) {
+      map['book_id'] = Variable<String>(bookId.value);
+    }
+    if (day.present) {
+      map['day'] = Variable<String>(day.value);
+    }
+    if (seconds.present) {
+      map['seconds'] = Variable<int>(seconds.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ReadingTimesCompanion(')
+          ..write('bookId: $bookId, ')
+          ..write('day: $day, ')
+          ..write('seconds: $seconds, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -2494,6 +2754,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $BookmarksTable bookmarks = $BookmarksTable(this);
   late final $BookTagsTable bookTags = $BookTagsTable(this);
   late final $SettingsKvTable settingsKv = $SettingsKvTable(this);
+  late final $ReadingTimesTable readingTimes = $ReadingTimesTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -2505,6 +2766,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     bookmarks,
     bookTags,
     settingsKv,
+    readingTimes,
   ];
 }
 
@@ -3810,6 +4072,168 @@ typedef $$SettingsKvTableProcessedTableManager =
       SettingsKvData,
       PrefetchHooks Function()
     >;
+typedef $$ReadingTimesTableCreateCompanionBuilder =
+    ReadingTimesCompanion Function({
+      required String bookId,
+      required String day,
+      Value<int> seconds,
+      Value<int> rowid,
+    });
+typedef $$ReadingTimesTableUpdateCompanionBuilder =
+    ReadingTimesCompanion Function({
+      Value<String> bookId,
+      Value<String> day,
+      Value<int> seconds,
+      Value<int> rowid,
+    });
+
+class $$ReadingTimesTableFilterComposer
+    extends Composer<_$AppDatabase, $ReadingTimesTable> {
+  $$ReadingTimesTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get bookId => $composableBuilder(
+    column: $table.bookId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get day => $composableBuilder(
+    column: $table.day,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get seconds => $composableBuilder(
+    column: $table.seconds,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$ReadingTimesTableOrderingComposer
+    extends Composer<_$AppDatabase, $ReadingTimesTable> {
+  $$ReadingTimesTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get bookId => $composableBuilder(
+    column: $table.bookId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get day => $composableBuilder(
+    column: $table.day,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get seconds => $composableBuilder(
+    column: $table.seconds,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$ReadingTimesTableAnnotationComposer
+    extends Composer<_$AppDatabase, $ReadingTimesTable> {
+  $$ReadingTimesTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get bookId =>
+      $composableBuilder(column: $table.bookId, builder: (column) => column);
+
+  GeneratedColumn<String> get day =>
+      $composableBuilder(column: $table.day, builder: (column) => column);
+
+  GeneratedColumn<int> get seconds =>
+      $composableBuilder(column: $table.seconds, builder: (column) => column);
+}
+
+class $$ReadingTimesTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $ReadingTimesTable,
+          ReadingTime,
+          $$ReadingTimesTableFilterComposer,
+          $$ReadingTimesTableOrderingComposer,
+          $$ReadingTimesTableAnnotationComposer,
+          $$ReadingTimesTableCreateCompanionBuilder,
+          $$ReadingTimesTableUpdateCompanionBuilder,
+          (
+            ReadingTime,
+            BaseReferences<_$AppDatabase, $ReadingTimesTable, ReadingTime>,
+          ),
+          ReadingTime,
+          PrefetchHooks Function()
+        > {
+  $$ReadingTimesTableTableManager(_$AppDatabase db, $ReadingTimesTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$ReadingTimesTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$ReadingTimesTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$ReadingTimesTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> bookId = const Value.absent(),
+                Value<String> day = const Value.absent(),
+                Value<int> seconds = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => ReadingTimesCompanion(
+                bookId: bookId,
+                day: day,
+                seconds: seconds,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String bookId,
+                required String day,
+                Value<int> seconds = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => ReadingTimesCompanion.insert(
+                bookId: bookId,
+                day: day,
+                seconds: seconds,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$ReadingTimesTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $ReadingTimesTable,
+      ReadingTime,
+      $$ReadingTimesTableFilterComposer,
+      $$ReadingTimesTableOrderingComposer,
+      $$ReadingTimesTableAnnotationComposer,
+      $$ReadingTimesTableCreateCompanionBuilder,
+      $$ReadingTimesTableUpdateCompanionBuilder,
+      (
+        ReadingTime,
+        BaseReferences<_$AppDatabase, $ReadingTimesTable, ReadingTime>,
+      ),
+      ReadingTime,
+      PrefetchHooks Function()
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -3826,4 +4250,6 @@ class $AppDatabaseManager {
       $$BookTagsTableTableManager(_db, _db.bookTags);
   $$SettingsKvTableTableManager get settingsKv =>
       $$SettingsKvTableTableManager(_db, _db.settingsKv);
+  $$ReadingTimesTableTableManager get readingTimes =>
+      $$ReadingTimesTableTableManager(_db, _db.readingTimes);
 }

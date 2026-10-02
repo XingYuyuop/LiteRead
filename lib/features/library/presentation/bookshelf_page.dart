@@ -4,12 +4,17 @@ import 'dart:io';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../app/theme_controller.dart';
 import '../../../core/storage/app_database.dart';
 import '../../../core/theme/reader_theme.dart';
+import '../../../core/update/update_service.dart';
+import '../../../core/update/update_ui.dart';
+import '../../backup/data/lan_sync.dart';
+import '../../backup/logic/backup_config.dart';
 import '../data/book_repository.dart';
 
 /// 书架视图偏好（排序 / 网格切换），持久化到 settings_kv
@@ -86,12 +91,36 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
   bool _importing = false;
   bool _dragging = false;
 
+  // ---- 导入进度（t2：逐本反馈，避免长批次无响应感） ----
+  int _importDone = 0;
+  int _importTotal = 0;
+  String _importCurrent = '';
+
   // ---- 批量管理模式 ----
   bool _selectionMode = false;
   final Set<String> _selectedIds = {};
 
   // ---- 分组筛选（null = 全部） ----
   String? _filterGroup;
+
+  @override
+  void initState() {
+    super.initState();
+    // 启动后按配置周期自动检查更新（有新版本才弹提示）
+    WidgetsBinding.instance.addPostFrameCallback((_) => _autoUpdateCheck());
+  }
+
+  Future<void> _autoUpdateCheck() async {
+    try {
+      final svc = UpdateService(ref.read(appDatabaseProvider));
+      final info = await svc.maybeAutoCheck();
+      if (info != null && info.isNewer && mounted) {
+        await showUpdateFoundDialog(context, info);
+      }
+    } catch (_) {
+      // 更新检查失败静默
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -160,6 +189,16 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
                     onPressed: () => ref
                         .read(bookshelfPrefsProvider.notifier)
                         .update((p) => p.copyWith(grid: !p.grid)),
+                  ),
+                  IconButton(
+                    tooltip: '阅读统计',
+                    icon: const Icon(Icons.insights_outlined),
+                    onPressed: () => context.push('/stats'),
+                  ),
+                  IconButton(
+                    tooltip: 'WiFi 传书',
+                    icon: const Icon(Icons.wifi),
+                    onPressed: () => _showWifiTransfer(context),
                   ),
                   IconButton(
                     tooltip: '设置',
@@ -292,6 +331,19 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
                   );
                 },
               ),
+              // 导入进度条（顶部细线 + FAB 计数）
+              if (_importing)
+                Positioned(
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  child: LinearProgressIndicator(
+                    minHeight: 3,
+                    value: _importTotal > 0
+                        ? _importDone / _importTotal
+                        : null,
+                  ),
+                ),
               // 拖拽悬停提示层
               if (_dragging) _DropOverlay(spec: spec),
             ],
@@ -302,6 +354,10 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
             : FloatingActionButton.extended(
                 heroTag: 'import',
                 onPressed: _importing ? null : _importBooks,
+                tooltip:
+                    _importing && _importCurrent.isNotEmpty
+                    ? '正在导入：$_importCurrent'
+                    : '导入书籍',
                 icon: _importing
                     ? const SizedBox(
                         width: 18,
@@ -309,7 +365,9 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.add),
-                label: Text(_importing ? '导入中…' : '导入书籍'),
+                label: Text(
+                  _importing ? '导入中 $_importDone/$_importTotal' : '导入书籍',
+                ),
               ),
       ),
     );
@@ -530,9 +588,159 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
     await _importPaths(result.files.map((f) => f.path!).toList());
   }
 
+  /// WiFi 传书：确保局域网服务已开启，弹出访问网址卡片（图 4 风格）。
+  /// 长按/点击网址即复制；「取消」关闭服务并不再随启动自开。
+  Future<void> _showWifiTransfer(BuildContext context) async {
+    final server = ref.read(lanSyncServerProvider);
+    final db = ref.read(appDatabaseProvider);
+    if (!server.running) {
+      try {
+        await server.start();
+        await db.setSetting('backup.lanSharing', 'true');
+      } catch (e) {
+        if (!context.mounted) return;
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('开启 WLAN 服务失败：$e')));
+        return;
+      }
+    }
+    final ips = await localIPv4Addresses();
+    final urls = [for (final ip in ips) 'http://$ip:${server.port}'];
+    if (!context.mounted || urls.isEmpty) return;
+
+    Future<void> copy(String text) async {
+      await Clipboard.setData(ClipboardData(text: text));
+      if (context.mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('网址已复制：$text')));
+      }
+    }
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        final cs = Theme.of(dialogContext).colorScheme;
+        return AlertDialog(
+          backgroundColor: cs.surface,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: 4),
+              Text(
+                'WLAN 传书已开启',
+                style: TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w700,
+                  color: cs.onSurface,
+                ),
+              ),
+              const SizedBox(height: 14),
+              Container(
+                width: 62,
+                height: 62,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: cs.primary.withValues(alpha: 0.12),
+                ),
+                child: Icon(Icons.wifi, size: 32, color: cs.primary),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                '请在电脑浏览器地址栏完整输入',
+                style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
+              ),
+              const SizedBox(height: 6),
+              for (final url in urls)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(8),
+                    onTap: () => copy(url),
+                    onLongPress: () => copy(url),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 6,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Flexible(
+                            child: Text(
+                              url,
+                              style: TextStyle(
+                                fontSize: 14,
+                                color: cs.primary,
+                                fontWeight: FontWeight.w600,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Icon(
+                            Icons.copy_outlined,
+                            size: 14,
+                            color: cs.onSurfaceVariant,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              const SizedBox(height: 10),
+              // 传书状态：已接收数量 + 最近书名
+              ValueListenableBuilder<LanTransferStats>(
+                valueListenable: server.transferStats,
+                builder: (context, stats, _) {
+                  final last = stats.lastTitle;
+                  return Text(
+                    stats.received == 0
+                        ? '等待传书…'
+                        : '已接收 ${stats.received} 本'
+                            '${last == null ? '' : ' · 《$last》'}',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: cs.onSurfaceVariant,
+                    ),
+                  );
+                },
+              ),
+              const SizedBox(height: 18),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton(
+                  onPressed: () async {
+                    await server.stop();
+                    await db.setSetting('backup.lanSharing', 'false');
+                    if (dialogContext.mounted) {
+                      Navigator.of(dialogContext).pop();
+                    }
+                  },
+                  child: const Text('取消'),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   Future<void> _importPaths(List<String> paths) async {
     if (paths.isEmpty || _importing) return;
-    setState(() => _importing = true);
+    setState(() {
+      _importing = true;
+      _importDone = 0;
+      _importTotal = paths.length;
+      _importCurrent = '';
+    });
     try {
       final repo = ref.read(bookRepositoryProvider);
       var imported = 0;
@@ -540,6 +748,10 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
       var duplicated = 0;
       String? lastError;
       for (final path in paths) {
+        final name = path.split(Platform.pathSeparator).last;
+        if (mounted) {
+          setState(() => _importCurrent = name);
+        }
         try {
           final outcome = await repo.importFile(path);
           if (outcome.duplicated) {
@@ -550,6 +762,9 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
         } catch (e) {
           failed++;
           lastError = e.toString();
+        }
+        if (mounted) {
+          setState(() => _importDone++);
         }
       }
       if (mounted) {
@@ -563,7 +778,9 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
         ).showSnackBar(SnackBar(content: Text(msg)));
       }
     } finally {
-      if (mounted) setState(() => _importing = false);
+      if (mounted) {
+        setState(() => _importing = false);
+      }
     }
   }
 

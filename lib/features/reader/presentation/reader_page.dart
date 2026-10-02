@@ -12,7 +12,8 @@ import 'package:window_manager/window_manager.dart';
 import '../../../app/theme_controller.dart';
 import '../../../core/storage/app_database.dart';
 import '../../../core/theme/reader_theme.dart';
-import '../../../engine/ir/book_document.dart' show Locator, TocEntry;
+import '../../../engine/ir/book_document.dart'
+    show BookDocument, Footnote, Locator, TocEntry;
 import '../../../engine/pagination/text_paginator.dart';
 import '../data/highlight_repository.dart';
 import '../logic/reader_controller.dart';
@@ -34,6 +35,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
   bool _menuVisible = false;
   final FocusNode _keyboardFocus = FocusNode();
   String? _lastThemeId;
+
+  /// 有效边距（_buildTextReader 布局时更新；命中测试/选区换算共用）
+  EdgeInsets _effMargins = const EdgeInsets.fromLTRB(16, 24, 16, 24);
 
   // ---- 四角信息（时间/电量需要定时刷新） ----
   Timer? _cornerTimer;
@@ -121,14 +125,18 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     final systemDark =
         MediaQuery.platformBrightnessOf(context) == Brightness.dark;
     final spec = themeState.resolve(systemDark);
-    final isDark = spec.isDark;
+    // 墨水屏模式：纯黑白高对比配色覆盖（消除彩色残影），动画已在 PageFlow 强制关闭
+    final isDark = settings.inkMode ? false : spec.isDark;
+    final effSpec = settings.inkMode ? _inkSpec(spec) : spec;
 
     // 主题注入控制器（颜色烘焙进排版）——仅在主题变化时，且延迟到帧末
-    if (_lastThemeId != spec.id) {
-      _lastThemeId = spec.id;
+    if (_lastThemeId != effSpec.id) {
+      _lastThemeId = effSpec.id;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
-          ref.read(readerControllerProvider.notifier).updateTheme(spec);
+          ref
+              .read(readerControllerProvider.notifier)
+              .updateTheme(effSpec);
         }
       });
     }
@@ -151,17 +159,34 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
       focusNode: _keyboardFocus,
       autofocus: true,
       onKeyEvent: _onKey,
-      child: SafeArea(
-        top: !settings.showStatusBar,
-        bottom: false,
-        child: isPdf
-            ? _PdfReaderView(book: state.book!)
-            : _buildTextReader(state, settings, spec, isDark),
-      ),
+      // 文本阅读的安全区在 _buildTextReader 内以「有效边距」统一处理；
+      // PDF 视图沿用系统 SafeArea
+      child: isPdf
+          ? SafeArea(
+              top: !settings.showStatusBar,
+              child: _PdfReaderView(book: state.book!),
+            )
+          : _buildTextReader(state, settings, effSpec, isDark),
     );
 
-    return Scaffold(backgroundColor: spec.background, body: body);
+    return Scaffold(backgroundColor: effSpec.background, body: body);
   }
+
+  /// 墨水屏配色：纯黑白、无彩色（高对比、无残影）
+  ReaderThemeSpec _inkSpec(ReaderThemeSpec s) => s.copyWith(
+    id: 'ink-override',
+    name: '墨水屏',
+    background: const Color(0xFFFFFFFF),
+    foreground: const Color(0xFF000000),
+    secondary: const Color(0xFF444444),
+    accent: const Color(0xFF000000),
+    highlightPalette: const [
+      Color(0x2E000000),
+      Color(0x2E000000),
+      Color(0x2E000000),
+      Color(0x2E000000),
+    ],
+  );
 
   // ---- 文本阅读区（EPUB/MD/TXT/MOBI） ----
 
@@ -178,12 +203,25 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
         final fullW = constraints.maxWidth.clamp(0.0, double.infinity);
         final areaW = (fullW * settings.contentWidthScale).clamp(40.0, fullW);
         final areaSize = Size(areaW, constraints.maxHeight);
+
+        // 有效边距 = 用户设置与预设安全下限取大，再叠加系统安全区
+        // （viewPadding 在沉浸模式隐藏系统栏后仍保留数值，确保文本
+        //  始终不进入刘海/手势条区域，也绝不与四角信息重叠）
+        final vp = MediaQuery.viewPaddingOf(context);
+        final eff = EdgeInsets.fromLTRB(
+          settings.marginLeft.clamp(18.0, 200.0) + vp.left,
+          settings.marginTop.clamp(28.0, 200.0) + vp.top,
+          settings.marginRight.clamp(18.0, 200.0) + vp.right,
+          settings.marginBottom.clamp(32.0, 200.0) + vp.bottom,
+        );
+        _effMargins = eff;
+
         // 视口注入（帧末执行，避免 build 期间副作用）
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) {
             ref
                 .read(readerControllerProvider.notifier)
-                .updateViewport(areaSize);
+                .updateViewport(areaSize, eff);
           }
         });
         return Stack(
@@ -355,7 +393,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
           laid: chapterLaid,
           page: page,
           theme: spec,
-          margins: settings.margins,
+          margins: _effMargins,
           resources: doc.resources,
           marks: _marksFor(s.spineIndex, page),
           selection: _selecting
@@ -477,12 +515,12 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     return PageCanvas.hitTestChar(
       laid,
       laid.pages[s.pageIndex],
-      ref.read(readerSettingsProvider).margins,
+      _effMargins,
       local,
     );
   }
 
-  /// 中部点按：选择态清除选择；命中有批注则编辑；否则弹出菜单
+  /// 中部点按：选择态清除选择；命中有批注则编辑；命中注标弹脚注；否则弹出菜单
   void _onCenterTap(Offset local) {
     if (_selecting || _activeHighlight != null) {
       setState(() {
@@ -503,8 +541,58 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
           return;
         }
       }
+      // 注标命中：弹出脚注内容（EPUB noteref）
+      final doc = s.document;
+      if (doc != null && s.spineIndex >= 0 && s.spineIndex < doc.spine.length) {
+        final run = doc.spine[s.spineIndex].inlineRunAt(char);
+        final refId = run?.refId;
+        if (refId != null) {
+          final fn = _findFootnote(doc, refId, s.spineIndex);
+          if (fn != null) {
+            _showFootnote(fn);
+            return;
+          }
+        }
+      }
     }
     setState(() => _menuVisible = !_menuVisible);
+  }
+
+  // ---- 脚注（EPUB 注标） ----
+
+  /// 注标目标 → 脚注内容：优先当前章，其次全书
+  /// （跨文件注标：内容常集中在章末/书末 notes 文件）
+  Footnote? _findFootnote(BookDocument doc, String id, int spineIndex) {
+    if (spineIndex >= 0 && spineIndex < doc.spine.length) {
+      final cur = doc.spine[spineIndex].footnotes[id];
+      if (cur != null) return cur;
+    }
+    for (final c in doc.spine) {
+      final f = c.footnotes[id];
+      if (f != null) return f;
+    }
+    return null;
+  }
+
+  Future<void> _showFootnote(Footnote fn) async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('注释'),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420, maxHeight: 400),
+          child: SingleChildScrollView(child: SelectableText(fn.text)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+    // 关闭后焦点交还页面，保证快捷键继续生效
+    _keyboardFocus.requestFocus();
   }
 
   /// 选中文本内容
@@ -530,6 +618,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
 
   /// 划词/批注操作条：贴近划线位置悬浮（上方优先，空间不足放下方）。
   /// 标注统一样式为下划线，划线直接以默认样式保存。
+  /// 无「取消」按钮：点击屏幕其他区域即自动关闭选择状态。
   Widget _buildSelectionOverlay(ReaderThemeSpec spec, Size areaSize) {
     final active = _activeHighlight;
     final actions = active == null
@@ -541,31 +630,52 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
               () => _saveSelectionHighlight(0, 1),
             ),
             ('复制', Icons.copy_outlined, _copySelection),
-            ('取消', Icons.close, _clearSelection),
           ]
         : <(String, IconData, VoidCallback)>[
             ('笔记', Icons.edit_note_outlined, () => _editNote(active)),
             ('删除', Icons.delete_outline, () => _deleteHighlight(active)),
-            ('取消', Icons.close, _clearSelection),
           ];
     final pill = Material(
       color: spec.background,
       elevation: 6,
       borderRadius: BorderRadius.circular(28),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             for (final (label, icon, onTap) in actions)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 2),
-                child: TextButton.icon(
-                  onPressed: onTap,
-                  icon: Icon(icon, size: 18, color: spec.foreground),
-                  label: Text(
-                    label,
-                    style: TextStyle(fontSize: 13, color: spec.foreground),
+              InkWell(
+                borderRadius: BorderRadius.circular(24),
+                onTap: onTap,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 8,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(icon, size: 18, color: spec.foreground),
+                      const SizedBox(width: 5),
+                      // forceStrutHeight 锁定行高：修复中英混排时
+                      // 部分字符被压缩变小的问题
+                      Text(
+                        label,
+                        strutStyle: const StrutStyle(
+                          fontSize: 14,
+                          height: 1.2,
+                          forceStrutHeight: true,
+                        ),
+                        style: TextStyle(
+                          fontSize: 14,
+                          height: 1.2,
+                          letterSpacing: 0,
+                          fontWeight: FontWeight.w500,
+                          color: spec.foreground,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
@@ -591,7 +701,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
       anchor = PageCanvas.selectionRect(
         laid,
         laid.pages[s.pageIndex],
-        ref.read(readerSettingsProvider).margins,
+        _effMargins,
         a,
         b,
       );
@@ -777,14 +887,24 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
       );
     }
 
+    // 四角信息整体避开系统安全区（刘海/手势条），不再贴屏幕边缘
+    final vp = MediaQuery.viewPaddingOf(context);
     return IgnorePointer(
-      child: Stack(
-        children: [
-          corner(settings.cornerTopLeft, Alignment.topLeft),
-          corner(settings.cornerTopRight, Alignment.topRight),
-          corner(settings.cornerBottomLeft, Alignment.bottomLeft),
-          corner(settings.cornerBottomRight, Alignment.bottomRight),
-        ],
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          vp.left + 6,
+          vp.top + 6,
+          vp.right + 6,
+          vp.bottom + 6,
+        ),
+        child: Stack(
+          children: [
+            corner(settings.cornerTopLeft, Alignment.topLeft),
+            corner(settings.cornerTopRight, Alignment.topRight),
+            corner(settings.cornerBottomLeft, Alignment.bottomLeft),
+            corner(settings.cornerBottomRight, Alignment.bottomRight),
+          ],
+        ),
       ),
     );
   }
@@ -1055,6 +1175,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
               ),
           ],
         ),
+        const SizedBox(height: 10),
+        PageAnimPreview(type: pageTurnTypeOf(settings.pageAnim)),
       ],
     );
   }

@@ -11,7 +11,8 @@ import 'html_lite_converter.dart';
 /// PDB 容器 → PalmDOC 记录 → PalmDOC-LZ77 解压 → HTML → 复用 HTML-lite 管线，
 /// 从此 MOBI/AZW3 与 EPUB/MD 共用全部排版/主题/标注能力。
 ///
-/// 不支持（抛 [BookParseException] 明确提示）：HUFF/CDIC 压缩、DRM 加密。
+/// 不支持（抛 [BookParseException] 明确提示）：DRM 加密。
+/// HUFF/CDIC 压缩（KF8/AZW3 常见）已完整支持，算法移植自 KindleUnpack。
 /// 分章：MOBI6 按 <mbp:pagebreak/>；KF8 无此标记时整书单章（目录仍可跳转）。
 class MobiParser {
   const MobiParser();
@@ -58,10 +59,7 @@ class MobiParser {
     if (encryption != 0) {
       throw const BookParseException('该文件包含 DRM 加密，法律风险原因明确不支持');
     }
-    if (compression == 17480) {
-      throw const BookParseException('该 MOBI 使用 HUFF/CDIC 压缩，当前版本暂不支持');
-    }
-    if (compression != 1 && compression != 2) {
+    if (compression != 1 && compression != 2 && compression != 17480) {
       throw BookParseException('未知的 MOBI 压缩类型：$compression');
     }
 
@@ -69,6 +67,8 @@ class MobiParser {
     var textEncoding = 1252; // 默认 Latin-1
     var firstImageIndex = -1;
     var extraFlags = 0; // 记录尾部附加数据标志（KF8/AZW3 必有）
+    var huffRecordIndex = 0; // HUFF 记录号（1-based，压缩类型 17480 时有效）
+    var huffRecordCount = 0; // HUFF + CDIC 记录总数
     String? fullName;
     final hasMobiHeader = rec0.length >= 24 && _ascii(rec0, 16, 'MOBI');
     if (hasMobiHeader) {
@@ -77,6 +77,9 @@ class MobiParser {
           rec0.length >= absOffset + 4 && 16 + headerLength > absOffset;
       if (has(28)) textEncoding = _u32(rec0, 28);
       if (has(108)) firstImageIndex = _u32(rec0, 108);
+      // 112/116 = MOBI header 内的 Huffman 记录偏移与数量（1-based）
+      if (has(112)) huffRecordIndex = _u32(rec0, 112);
+      if (has(116)) huffRecordCount = _u32(rec0, 116);
       // 242 = MOBI header 内的 extra record data flags（16 位）
       if (rec0.length >= 244 && 16 + headerLength >= 244) {
         extraFlags = _u16(rec0, 242);
@@ -123,13 +126,36 @@ class MobiParser {
 
     // ---- 文本记录解压拼接 ----
     // 关键修复：KF8/AZW3 记录尾部带附加数据（extra data flags），
-    // 不剥离会污染 LZ77 解压流，导致整本书乱码。
+    // 不剥离会污染解压流，导致整本书乱码。
+    // HUFF/CDIC（17480）：先加载 Huffman 表与多张 CDIC 词典，逐记录解码。
+    _HuffCdic? huff;
+    if (compression == 17480) {
+      // HUFF 记录号（1-based）+ 数量（含 HUFF 自身）必须合法，
+      // 缺失/越界直接报词典缺失，避免深层解码抛出模糊错误
+      if (huffRecordIndex < 1 ||
+          huffRecordCount < 2 ||
+          huffRecordIndex - 1 + huffRecordCount > numRecords) {
+        throw const BookParseException('该 AZW3 的 HUFF/CDIC 词典缺失或损坏');
+      }
+      huff = _HuffCdic();
+      huff.loadHuff(record(huffRecordIndex - 1));
+      for (var i = 1; i < huffRecordCount; i++) {
+        final cdic = record(huffRecordIndex - 1 + i);
+        if (cdic.isEmpty) continue;
+        huff.loadCdic(cdic);
+      }
+      if (huff.dictionaryCount == 0) {
+        throw const BookParseException('该 AZW3 的 HUFF/CDIC 词典缺失或损坏');
+      }
+    }
     final textBytes = BytesBuilder(copy: false);
     for (var i = 1; i <= textRecordCount && i < numRecords; i++) {
       final raw = record(i);
       final clean = extraFlags != 0 ? _stripTrailingData(raw, extraFlags) : raw;
       if (compression == 2) {
         textBytes.add(palmDocDecompress(clean));
+      } else if (compression == 17480) {
+        textBytes.add(huff!.unpack(clean));
       } else {
         textBytes.add(clean);
       }
@@ -388,6 +414,153 @@ class MobiParseResult {
   final BookDocument document;
   final List<int>? coverBytes;
 }
+
+/// HUFF/CDIC Huffman 解码器（KF8/AZW3 压缩类型 17480）。
+///
+/// 算法忠实移植 KindleUnpack（lib/mobi_uncompress.py，MIT License）：
+///  - HUFF 记录：256 项一级缓存表（dict1，索引 = 32 位码的前 8 位）
+///    + 64 个 u32 的 mincode/maxcode 表（对应码长 1..32）；
+///  - CDIC 记录：码元词典，每项 u16 偏移 + 长度/标志位；
+///  - 词典项可递归引用其他项（flag=0 表示未展开）。
+class _HuffCdic {
+  final List<(int, bool, int)> _dict1 = []; // (codelen, term, maxcode)
+  final List<int> _mincode = [];
+  final List<int> _maxcode = [];
+  final List<(Uint8List, bool)?> _dictionary = [];
+
+  int get dictionaryCount => _dictionary.length;
+
+  void loadHuff(Uint8List huff) {
+    if (huff.length < 24 || !_ascii(huff, 0, 'HUFF')) {
+      throw const BookParseException('AZW3 解码失败：HUFF 记录损坏');
+    }
+    final off1 = _u32(huff, 8);
+    final off2 = _u32(huff, 12);
+    if (off1 <= 0 || off1 + 4 * 256 > huff.length) {
+      throw const BookParseException('AZW3 解码失败：HUFF 缓存表越界');
+    }
+    if (off2 <= 0 || off2 + 4 * 64 > huff.length) {
+      throw const BookParseException('AZW3 解码失败：HUFF 码表越界');
+    }
+
+    // 一级缓存表：256 项，codelen = v & 0x1f，term = v & 0x80，maxcode = v >> 8
+    for (var i = 0; i < 256; i++) {
+      final v = _u32(huff, off1 + 4 * i);
+      final codelen = v & 0x1f;
+      if (codelen == 0) {
+        throw const BookParseException('AZW3 解码失败：HUFF 码长为 0');
+      }
+      final term = v & 0x80 != 0;
+      final maxcode = (((v >> 8) + 1) << (32 - codelen)) - 1;
+      _dict1.add((codelen, term, maxcode));
+    }
+
+    // mincode/maxcode 表：64 个 u32，偶位 mincode、奇位 maxcode，码长 1..32。
+    // c==1 时理论上限 2^63 会溢出 Dart int，用 BigInt 钳位到 int 最大值。
+    final intMax = BigInt.parse('9223372036854775807');
+    _mincode.add(0);
+    _maxcode.add(((BigInt.one << 32) - BigInt.one).toInt());
+    for (var c = 1; c <= 32; c++) {
+      final mnRaw = _u32(huff, off2 + 4 * (2 * (c - 1)));
+      var mn = BigInt.from(mnRaw) << (32 - c);
+      if (mn > intMax) mn = intMax;
+      _mincode.add(mn.toInt());
+      final mxRaw = _u32(huff, off2 + 4 * (2 * (c - 1) + 1));
+      var mx = BigInt.from(mxRaw + 1) << (32 - c);
+      if (mx > intMax) mx = intMax;
+      _maxcode.add(mx.toInt() - 1);
+    }
+  }
+
+  void loadCdic(Uint8List cdic) {
+    if (cdic.length < 16 || !_ascii(cdic, 0, 'CDIC')) {
+      throw const BookParseException('AZW3 解码失败：CDIC 记录损坏');
+    }
+    final phrases = _u32(cdic, 8);
+    final bits = _u32(cdic, 12);
+    if (phrases <= _dictionary.length || bits <= 0 || bits > 31) return;
+    final n = (1 << bits) < (phrases - _dictionary.length)
+        ? (1 << bits)
+        : phrases - _dictionary.length;
+    for (var i = 0; i < n; i++) {
+      final off = _u16(cdic, 16 + 2 * i);
+      if (18 + off + 2 > cdic.length) break;
+      final blen = _u16(cdic, 16 + off);
+      final len = blen & 0x7fff;
+      if (18 + off + len > cdic.length) break;
+      final slice = Uint8List.sublistView(cdic, 18 + off, 18 + off + len);
+      _dictionary.add((slice, blen & 0x8000 != 0));
+    }
+  }
+
+  /// 解码一条文本记录
+  Uint8List unpack(Uint8List data) {
+    var bitsLeft = data.length * 8;
+    // 尾部补 8 个零字节，保证 64 位滑动窗口读取越界安全
+    final padded = Uint8List(data.length + 8);
+    padded.setRange(0, data.length, data);
+    final bd = ByteData.sublistView(padded);
+    var pos = 0;
+    var x = _u64(bd, pos);
+    var n = 32;
+    final out = BytesBuilder(copy: false);
+
+    while (true) {
+      if (n <= 0) {
+        pos += 4;
+        if (pos + 8 > padded.length) break;
+        x = _u64(bd, pos);
+        n += 32;
+      }
+      final code = (x >> n) & 0xFFFFFFFF;
+      final e = _dict1[code >> 24];
+      var codelen = e.$1;
+      var maxcode = e.$3;
+      if (!e.$2) {
+        // 未命中一级缓存：沿码长递增查找
+        while (codelen < 32 && code < _mincode[codelen]) {
+          codelen++;
+        }
+        if (codelen > 32) break;
+        maxcode = _maxcode[codelen];
+      }
+      n -= codelen;
+      bitsLeft -= codelen;
+      if (bitsLeft < 0) break;
+      final r = (maxcode - code) >> (32 - codelen);
+      if (r < 0 || r >= _dictionary.length) break; // 损坏防御
+      var entry = _dictionary[r];
+      if (entry == null) break; // 循环引用防御
+      if (!entry.$2) {
+        // 未展开的词典项：递归展开后缓存
+        _dictionary[r] = null;
+        final expanded = unpack(entry.$1);
+        _dictionary[r] = (expanded, true);
+        entry = (expanded, true);
+      }
+      out.add(entry.$1);
+    }
+    return out.toBytes();
+  }
+
+  // ---- 基础工具（与 MobiParser 内同名方法一致） ----
+
+  static bool _ascii(List<int> b, int offset, String s) {
+    if (offset + s.length > b.length) return false;
+    for (var i = 0; i < s.length; i++) {
+      if (b[offset + i] != s.codeUnitAt(i)) return false;
+    }
+    return true;
+  }
+
+  static int _u16(List<int> b, int o) => (b[o] << 8) | b[o + 1];
+
+  static int _u32(List<int> b, int o) =>
+      (b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3];
+
+  static int _u64(ByteData bd, int o) => bd.getUint64(o);
+}
+
 
 /// UTF-8 容错解码（坏字节替换为 U+FFFD，不抛异常）
 String utf8DecodeBestEffort(List<int> data) {

@@ -116,6 +116,11 @@ class LanDiff {
   bool get isEmpty => remoteOnly.isEmpty && localOnly.isEmpty;
 }
 
+/// 备份/同步进度回调：(已完成步数, 本阶段总步数, 阶段描述)。
+/// 步数在每个阶段开始时归零重计。
+typedef BackupProgressCallback =
+    void Function(int done, int total, String phase);
+
 /// 备份与同步服务
 class BackupService {
   BackupService(this._repo, this._db);
@@ -182,7 +187,10 @@ class BackupService {
   // ---- 备份（推送到远端） ----
 
   /// 立即备份：上传缺失的书籍/封面 + 全部进度 + 新清单
-  Future<BackupResult> backup(RemoteStore store) async {
+  Future<BackupResult> backup(
+    RemoteStore store, {
+    BackupProgressCallback? onProgress,
+  }) async {
     final r = BackupResult();
     await _ensureDirs(store);
     final books = await _repo.listBooks();
@@ -192,8 +200,16 @@ class BackupService {
     final remoteIds = remoteBookFiles
         .map((p) => p.split('/').last.split('.').first)
         .toSet();
+    final toUpload = books.where((b) => !remoteIds.contains(b.id)).toList();
 
-    for (final b in books) {
+    // 进度全部上传（备份以本机为当前状态）
+    final progressRows = await _repo.allProgressRows();
+    final total = toUpload.length + progressRows.length + 1;
+    var done = 0;
+    void step(String phase) => onProgress?.call(++done, total, phase);
+
+    for (final b in toUpload) {
+      onProgress?.call(done, total, '上传 ${b.title}');
       if (!remoteIds.contains(b.id)) {
         final f = File(b.filePath);
         if (await f.exists()) {
@@ -208,10 +224,10 @@ class BackupService {
           }
         }
       }
+      step('上传书籍');
     }
 
-    // 进度全部上传（备份以本机为当前状态）
-    for (final p in await _repo.allProgressRows()) {
+    for (final p in progressRows) {
       await store.putFile(
         'progress/${p.bookId}.json',
         utf8.encode(
@@ -224,9 +240,11 @@ class BackupService {
           }),
         ),
       );
+      step('上传进度');
     }
 
     // 清单
+    onProgress?.call(done, total, '写入清单');
     final manifest = await buildManifest();
     final name = BackupManifest.fileNameFor(
       manifest.deviceName,
@@ -234,6 +252,7 @@ class BackupService {
     );
     await store.putFile(name, utf8.encode(jsonEncode(manifest.toJson())));
     r.manifestName = name;
+    onProgress?.call(total, total, '完成');
     return r;
   }
 
@@ -243,7 +262,10 @@ class BackupService {
   /// - 远端有本地没有的书 → 下载入库
   /// - 本地有远端没有的书 → 上传
   /// - 进度按 updatedAt 新者胜（双向）
-  Future<BackupResult> sync(RemoteStore store) async {
+  Future<BackupResult> sync(
+    RemoteStore store, {
+    BackupProgressCallback? onProgress,
+  }) async {
     final r = BackupResult();
     await _ensureDirs(store);
 
@@ -256,25 +278,36 @@ class BackupService {
         if (id != null && !remoteBooks.containsKey(id)) remoteBooks[id] = b;
       }
     }
+    final toDownload = remoteBooks.values
+        .where((e) => _bookById(localBooks, e['id'] as String) == null)
+        .toList();
+    final toPush = localBooks.where((b) => !remoteBooks.containsKey(b.id)).toList();
+    final total = toDownload.length + toPush.length + 2; // + 进度合并 + 清单
+    var done = 0;
+    void step(String phase) => onProgress?.call(++done, total, phase);
 
     // 1. 下载远端独有的书籍
-    for (final entry in remoteBooks.values) {
-      final id = entry['id'] as String;
-      if (_bookById(localBooks, id) != null) continue;
+    for (final entry in toDownload) {
+      onProgress?.call(done, total, '下载 ${entry['title'] ?? '书籍'}');
       if (await _downloadBook(store, entry)) r.booksDownloaded++;
+      step('下载书籍');
     }
 
     // 2. 上传本地独有的书籍
-    for (final b in localBooks) {
-      if (remoteBooks.containsKey(b.id)) continue;
+    for (final b in toPush) {
+      onProgress?.call(done, total, '上传 ${b.title}');
       await _uploadSingleBook(store, b);
       r.booksUploaded++;
+      step('上传书籍');
     }
 
     // 3. 进度差异合并（新者胜，双向）
+    onProgress?.call(done, total, '合并进度');
     await _mergeProgress(store, r);
+    step('合并进度');
 
     // 4. 上传本机最新清单（供其他设备检索）
+    onProgress?.call(done, total, '写入清单');
     final manifest = await buildManifest();
     final name = BackupManifest.fileNameFor(
       manifest.deviceName,
@@ -285,6 +318,7 @@ class BackupService {
 
     // 清理：仅保留每设备最新 3 份清单
     await _pruneManifests(store, keepPerDevice: 3);
+    onProgress?.call(total, total, '完成');
     return r;
   }
 
@@ -332,18 +366,29 @@ class BackupService {
     bool push = false,
     List<String> deleteLocalIds = const [],
     List<String> deleteRemoteIds = const [],
+    BackupProgressCallback? onProgress,
   }) async {
     final r = BackupResult();
     await _ensureDirs(store);
+    final total =
+        (pull ? diff.remoteOnly.length : 0) +
+        (push ? diff.localOnly.length : 0) +
+        (pull || push ? 1 : 0); // + 进度合并
+    var done = 0;
+    void step(String phase) => onProgress?.call(++done, total, phase);
     if (pull) {
       for (final e in diff.remoteOnly) {
+        onProgress?.call(done, total, '下载 ${e['title'] ?? '书籍'}');
         if (await _downloadBook(store, e)) r.booksDownloaded++;
+        step('拉取书籍');
       }
     }
     if (push) {
       for (final b in diff.localOnly) {
+        onProgress?.call(done, total, '上传 ${b.title}');
         await _uploadSingleBook(store, b);
         r.booksUploaded++;
+        step('推送书籍');
       }
     }
     // 本机删除指定内容（用户在确认对话框中勾选）
@@ -358,8 +403,11 @@ class BackupService {
     }
     // 进度双向合并（新者胜；仅在有内容变动时执行）
     if (pull || push) {
+      onProgress?.call(done, total, '合并进度');
       await _mergeProgress(store, r);
+      step('合并进度');
     }
+    onProgress?.call(total, total, '完成');
     return r;
   }
 
@@ -373,6 +421,7 @@ class BackupService {
   Future<BackupResult> restore(
     RemoteStore store, {
     String? manifestName,
+    BackupProgressCallback? onProgress,
   }) async {
     final r = BackupResult();
     await _ensureDirs(store);
@@ -407,17 +456,25 @@ class BackupService {
     r.settingsRestored = true;
 
     // 2. 补齐书籍
+    final missing = <Map<String, dynamic>>[];
     for (final entry in manifest.books) {
       final id = entry['id'] as String?;
       if (id == null) continue;
       final existing = await _repo.getBook(id);
-      if (existing == null) {
-        if (await _downloadBook(store, entry)) r.booksDownloaded++;
-      }
+      if (existing == null) missing.add(entry);
+    }
+    final total = missing.length + 1; // + 进度合并
+    var done = 0;
+    for (final entry in missing) {
+      onProgress?.call(done, total, '下载 ${entry['title'] ?? '书籍'}');
+      if (await _downloadBook(store, entry)) r.booksDownloaded++;
+      onProgress?.call(++done, total, '下载书籍');
     }
 
     // 3. 进度合并（本机缺失或远端更新才应用）
+    onProgress?.call(done, total, '合并进度');
     await _mergeProgress(store, r);
+    onProgress?.call(total, total, '完成');
     r.manifestName = chosenName;
     return r;
   }

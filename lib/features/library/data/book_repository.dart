@@ -16,10 +16,16 @@ class BookRepository {
 
   final AppDatabase _db;
 
-  /// 导入文件：解析元数据 → 内容哈希去重 → 托管副本 + 封面 → 入库
+  /// 导入文件：流式哈希去重 → 解析 → 托管副本 + 封面 → 入库
+  ///
+  /// 性能要点（大文件导入不卡顿、不双倍占内存）：
+  /// - 哈希按 1MB 分块流式计算，不再 `readAsBytes` 全量驻留；
+  /// - 解析在 isolate 内自行读文件（不传 bytesHint）；
+  /// - 托管副本用 `File.copy` 流式复制。
   Future<ImportOutcome> importFile(String path) async {
-    final bytes = await File(path).readAsBytes();
-    final id = sha256.convert(bytes).toString();
+    final src = File(path);
+    final fileSize = await src.length();
+    final id = await _hashFileStreaming(src);
 
     final existing = await (_db.select(
       _db.books,
@@ -28,14 +34,14 @@ class BookRepository {
       return ImportOutcome(book: existing, duplicated: true);
     }
 
-    final output = await const BookParser().parseFile(path, bytesHint: bytes);
+    final output = await const BookParser().parseFile(path);
     final doc = output.document;
 
-    // 托管副本
+    // 托管副本（流式复制，不占额外内存）
     final ext = path.toLowerCase().split('.').last;
     final libDir = await AppDirs.library();
     final managedPath = '${libDir.path}${Platform.pathSeparator}$id.$ext';
-    await File(managedPath).writeAsBytes(bytes, flush: true);
+    await src.copy(managedPath);
 
     // 封面
     String? coverPath;
@@ -53,7 +59,7 @@ class BookRepository {
       language: Value(doc.meta.language),
       format: formatName(output.format),
       filePath: managedPath,
-      fileSize: Value(bytes.length),
+      fileSize: Value(fileSize),
       coverPath: Value(coverPath),
       addedAt: DateTime.now().millisecondsSinceEpoch,
       metaJson: Value(jsonEncode(_buildMeta(doc, output))),
@@ -64,6 +70,25 @@ class BookRepository {
       _db.books,
     )..where((t) => t.id.equals(id))).getSingle();
     return ImportOutcome(book: row, duplicated: false);
+  }
+
+  /// 流式计算文件 sha256（1MB 分块读取，避免大文件全量载入内存）
+  static Future<String> _hashFileStreaming(File f) async {
+    final sink = _DigestSink();
+    final converter = sha256.startChunkedConversion(sink);
+    final raf = await f.open();
+    try {
+      const chunkSize = 1 << 20;
+      while (true) {
+        final chunk = await raf.read(chunkSize);
+        if (chunk.isEmpty) break;
+        converter.add(chunk);
+      }
+    } finally {
+      await raf.close();
+    }
+    converter.close();
+    return sink.digest.toString();
   }
 
   Map<String, dynamic> _buildMeta(BookDocument doc, ParseOutput output) => {
@@ -297,6 +322,102 @@ class BookRepository {
         .watchSingleOrNull()
         .map((row) => row?.percent);
   }
+
+  // ---- 阅读时长统计 ----
+
+  /// 累计阅读时长：按 书籍 × 本地日期 聚合（秒），供日/周/总统计
+  Future<void> addReadingTime(String bookId, int seconds) async {
+    if (seconds <= 0) return;
+    final now = DateTime.now();
+    final day =
+        '${now.year}-'
+        '${now.month.toString().padLeft(2, '0')}-'
+        '${now.day.toString().padLeft(2, '0')}';
+    final row =
+        await (_db.select(_db.readingTimes)
+              ..where((t) => t.bookId.equals(bookId) & t.day.equals(day)))
+            .getSingleOrNull();
+    if (row == null) {
+      await _db
+          .into(_db.readingTimes)
+          .insert(
+            ReadingTimesCompanion.insert(
+              bookId: bookId,
+              day: day,
+              seconds: Value(seconds),
+            ),
+          );
+    } else {
+      await (_db.update(_db.readingTimes)
+            ..where((t) => t.bookId.equals(bookId) & t.day.equals(day)))
+          .write(ReadingTimesCompanion(seconds: Value(row.seconds + seconds)));
+    }
+  }
+
+  /// 阅读统计：[fromDay, toDay] 日期区间（闭区间，null = 不限），按书汇总秒数。
+  /// 书籍可能已被删除 → 标题回退为「已删除书籍」。
+  Future<List<ReadingStatRow>> readingStats({
+    String? fromDay,
+    String? toDay,
+  }) async {
+    final rows = await _db.select(_db.readingTimes).get();
+    final books = await _db.select(_db.books).get();
+    final titleById = {for (final b in books) b.id: b.title};
+
+    // 区间过滤（yyyy-MM-dd 字典序即时间序）+ 按书聚合
+    final agg = <String, int>{};
+    for (final r in rows) {
+      if (fromDay != null && r.day.compareTo(fromDay) < 0) continue;
+      if (toDay != null && r.day.compareTo(toDay) > 0) continue;
+      agg[r.bookId] = (agg[r.bookId] ?? 0) + r.seconds;
+    }
+    final out = [
+      for (final e in agg.entries)
+        ReadingStatRow(
+          bookId: e.key,
+          title: titleById[e.key] ?? '已删除书籍',
+          seconds: e.value,
+        ),
+    ]..sort((a, b) => b.seconds - a.seconds);
+    return out;
+  }
+
+  /// 指定日期区间的总阅读秒数
+  Future<int> readingTotalSeconds({String? fromDay, String? toDay}) async {
+    final rows = await readingStats(fromDay: fromDay, toDay: toDay);
+    var total = 0;
+    for (final r in rows) {
+      total += r.seconds;
+    }
+    return total;
+  }
+
+  static String dayOf(DateTime d) =>
+      '${d.year}-'
+      '${d.month.toString().padLeft(2, '0')}-'
+      '${d.day.toString().padLeft(2, '0')}';
+}
+
+/// 单本书的阅读统计（聚合后）
+class ReadingStatRow {
+  const ReadingStatRow({
+    required this.bookId,
+    required this.title,
+    required this.seconds,
+  });
+
+  final String bookId;
+  final String title;
+  final int seconds;
+}
+
+/// 秒数 → 「X 小时 Y 分钟」/「Y 分钟」/「不足 1 分钟」
+String formatDuration(int seconds) {
+  if (seconds < 60) return '不足 1 分钟';
+  final h = seconds ~/ 3600;
+  final m = (seconds % 3600) ~/ 60;
+  if (h == 0) return '$m 分钟';
+  return '$h 小时 $m 分钟';
 }
 
 enum BookSort { lastRead, addedAt, title }
@@ -323,6 +444,20 @@ class ImportOutcome {
 
   final Book book;
   final bool duplicated;
+}
+
+/// 流式哈希收集器（crypto 分块转换的终点）
+class _DigestSink implements Sink<Digest> {
+  Digest? _digest;
+
+  Digest get digest =>
+      _digest ?? (throw StateError('哈希尚未完成（未调用 close）'));
+
+  @override
+  void add(Digest data) => _digest = data;
+
+  @override
+  void close() {}
 }
 
 final bookRepositoryProvider = Provider<BookRepository>((ref) {

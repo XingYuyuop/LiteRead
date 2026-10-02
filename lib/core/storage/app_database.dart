@@ -92,15 +92,33 @@ class SettingsKv extends Table {
   Set<Column> get primaryKey => {key};
 }
 
+/// 阅读时长统计（按 书籍 × 本地日期 聚合，秒；v4 新增）
+class ReadingTimes extends Table {
+  TextColumn get bookId => text()();
+  TextColumn get day => text()(); // yyyy-MM-dd（本地时区）
+  IntColumn get seconds => integer().withDefault(const Constant(0))();
+
+  @override
+  Set<Column> get primaryKey => {bookId, day};
+}
+
 @DriftDatabase(
-  tables: [Books, Progress, Highlights, Bookmarks, BookTags, SettingsKv],
+  tables: [
+    Books,
+    Progress,
+    Highlights,
+    Bookmarks,
+    BookTags,
+    SettingsKv,
+    ReadingTimes,
+  ],
 )
 class AppDatabase extends _$AppDatabase {
   /// [executor] 供测试注入内存数据库；生产环境用应用支持目录
   AppDatabase({QueryExecutor? executor}) : super(executor ?? _open());
 
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 4;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -112,6 +130,10 @@ class AppDatabase extends _$AppDatabase {
       // v3：Books 增加书架分组列
       if (from < 3) {
         await m.addColumn(books, books.groupName);
+      }
+      // v4：新增阅读时长统计表
+      if (from < 4) {
+        await m.createTable(readingTimes);
       }
     },
   );
