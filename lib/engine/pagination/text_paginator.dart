@@ -440,6 +440,17 @@ class TextPaginator {
       text: TextSpan(children: spans),
       textDirection: TextDirection.ltr,
       textAlign: align,
+      // 强制等高 strut：行高不再随行内字符（中文/西文/数字/表情等回退字体）变化。
+      // 否则西文字体回退会让某些行高 2–3px，整页累积后末行位置忽上忽下；
+      // 固定后每行高度恒为 fontSize × height，页末行始终落在同一网格线上。
+      strutStyle: StrutStyle(
+        fontSize: fontSize,
+        height: height,
+        fontWeight: fontWeight,
+        fontFamily: fontFamily,
+        fontFamilyFallback: styles.fontFallbacks,
+        forceStrutHeight: true,
+      ),
     );
     final availWidth = cfg.contentWidth - quoteIndent - listIndent;
 

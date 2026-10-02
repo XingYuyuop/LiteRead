@@ -11,6 +11,7 @@ import 'package:go_router/go_router.dart';
 import '../../../app/theme_controller.dart';
 import '../../../core/storage/app_database.dart';
 import '../../../core/theme/reader_theme.dart';
+import '../../../core/ui/app_snackbar.dart';
 import '../../../core/update/update_service.dart';
 import '../../../core/update/update_ui.dart';
 import '../../backup/data/lan_sync.dart';
@@ -215,9 +216,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
                 )
                 .toList();
             if (paths.isEmpty) {
-              ScaffoldMessenger.of(
-                context,
-              ).showSnackBar(const SnackBar(content: Text('暂不支持该文件格式')));
+              showAppSnackBar(context, '暂不支持该文件格式');
               return;
             }
             _importPaths(paths);
@@ -332,9 +331,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
                   right: 0,
                   child: LinearProgressIndicator(
                     minHeight: 3,
-                    value: _importTotal > 0
-                        ? _importDone / _importTotal
-                        : null,
+                    value: _importTotal > 0 ? _importDone / _importTotal : null,
                   ),
                 ),
               // 拖拽悬停提示层
@@ -343,12 +340,11 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
           ),
         ),
         floatingActionButton: _selectionMode
-            ? null
+            ? _buildSelectionActions()
             : FloatingActionButton.extended(
                 heroTag: 'import',
                 onPressed: _importing ? null : _importBooks,
-                tooltip:
-                    _importing && _importCurrent.isNotEmpty
+                tooltip: _importing && _importCurrent.isNotEmpty
                     ? '正在导入：$_importCurrent'
                     : '导入书籍',
                 icon: _importing
@@ -380,22 +376,63 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
       ),
       title: Text('已选 $count 本'),
       backgroundColor: cs.surfaceContainerHighest.withValues(alpha: 0.5),
-      actions: [
-        IconButton(
-          tooltip: '全选/取消全选',
-          icon: const Icon(Icons.select_all),
-          onPressed: _toggleSelectAll,
+    );
+  }
+
+  /// 批量管理右下角操作面板：全选 / 移动分组 / 删除 / 查看书籍信息（仅单选）
+  Widget _buildSelectionActions() {
+    final cs = Theme.of(context).colorScheme;
+    final count = _selectedIds.length;
+    Widget action({
+      required IconData icon,
+      required String label,
+      required VoidCallback? onTap,
+      Color? color,
+    }) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: FilledButton.tonalIcon(
+          style: FilledButton.styleFrom(
+            backgroundColor: cs.surfaceContainerHighest,
+            foregroundColor: color ?? cs.onSurface,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          ),
+          onPressed: onTap,
+          icon: Icon(icon, size: 18),
+          label: Text(label, style: const TextStyle(fontSize: 13)),
         ),
-        IconButton(
-          tooltip: '移动到分组',
-          icon: const Icon(Icons.drive_file_move_outline),
-          onPressed: count == 0 ? null : _batchMoveToGroup,
+      );
+    }
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        action(icon: Icons.select_all, label: '全选', onTap: _toggleSelectAll),
+        action(
+          icon: Icons.drive_file_move_outline,
+          label: '移动分组',
+          onTap: count == 0 ? null : _batchMoveToGroup,
         ),
-        IconButton(
-          tooltip: '删除所选',
-          icon: Icon(Icons.delete_outline, color: cs.error),
-          onPressed: count == 0 ? null : _batchDelete,
+        action(
+          icon: Icons.delete_outline,
+          label: '删除',
+          color: cs.error,
+          onTap: count == 0 ? null : _batchDelete,
         ),
+        // 书籍信息仅在选择单本书时提供
+        if (count == 1)
+          action(
+            icon: Icons.info_outline,
+            label: '查看书籍信息',
+            onTap: () {
+              final id = _selectedIds.single;
+              ref.read(bookRepositoryProvider).getBook(id).then((b) {
+                if (b == null || !mounted) return;
+                showBookDetails(context, ref, b);
+              });
+            },
+          ),
       ],
     );
   }
@@ -460,17 +497,13 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
       _onBookTap(book, selectionMode: true);
       return;
     }
-    showBookActions(
-      context,
-      ref,
-      book,
-      onMultiSelect: () {
-        setState(() {
-          _selectionMode = true;
-          _selectedIds.add(book.id);
-        });
-      },
-    );
+    // 长按直接进入批量管理模式（默认选中该书）
+    setState(() {
+      _selectionMode = true;
+      _selectedIds
+        ..clear()
+        ..add(book.id);
+    });
   }
 
   void _toggleSelectAll() {
@@ -535,9 +568,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
       _selectedIds.clear();
       _selectionMode = false;
     });
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('已删除 ${ids.length} 本书籍')));
+    showAppSnackBar(context, '已删除 ${ids.length} 本书籍');
   }
 
   Future<void> _batchMoveToGroup() async {
@@ -547,14 +578,9 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
     if (group == null) return; // 取消
     await ref.read(bookRepositoryProvider).setGroups(ids, group);
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          group.isEmpty
-              ? '已移出分组（${ids.length} 本）'
-              : '已移入「$group」（${ids.length} 本）',
-        ),
-      ),
+    showAppSnackBar(
+      context,
+      group.isEmpty ? '已移出分组（${ids.length} 本）' : '已移入「$group」（${ids.length} 本）',
     );
   }
 
@@ -592,9 +618,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
         await db.setSetting('backup.lanSharing', 'true');
       } catch (e) {
         if (!context.mounted) return;
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('开启 WLAN 服务失败：$e')));
+        showAppSnackBar(context, '开启 WLAN 服务失败：$e');
         return;
       }
     }
@@ -605,9 +629,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
     Future<void> copy(String text) async {
       await Clipboard.setData(ClipboardData(text: text));
       if (context.mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('网址已复制：$text')));
+        showAppSnackBar(context, '网址已复制：$text');
       }
     }
 
@@ -696,12 +718,9 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
                     stats.received == 0
                         ? '等待传书…'
                         : '已接收 ${stats.received} 本'
-                            '${last == null ? '' : ' · 《$last》'}',
+                              '${last == null ? '' : ' · 《$last》'}',
                     textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: cs.onSurfaceVariant,
-                    ),
+                    style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
                   );
                 },
               ),
@@ -766,9 +785,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
             : duplicated > 0
             ? '导入 $imported 本（$duplicated 本已存在）'
             : '导入 $imported 本';
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(msg)));
+        showAppSnackBar(context, msg);
       }
     } finally {
       if (mounted) {
@@ -836,9 +853,7 @@ class _SortSelector extends StatelessWidget {
                 Icon(
                   s == current ? Icons.check : Icons.sort,
                   size: 15,
-                  color: s == current
-                      ? cs.primary
-                      : cs.onSurfaceVariant,
+                  color: s == current ? cs.primary : cs.onSurfaceVariant,
                 ),
                 const SizedBox(width: 6),
                 Text(_labels[s] ?? '', style: const TextStyle(fontSize: 13)),
@@ -1194,99 +1209,6 @@ class _BookTile extends StatelessWidget {
       ),
     );
   }
-}
-
-/// 书籍操作菜单（长按封面 / 列表右侧按钮）
-void showBookActions(
-  BuildContext context,
-  WidgetRef ref,
-  Book book, {
-  VoidCallback? onMultiSelect,
-}) {
-  showModalBottomSheet<void>(
-    context: context,
-    builder: (context) => SafeArea(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          ListTile(
-            leading: const Icon(Icons.info_outline),
-            title: const Text('书籍详情'),
-            onTap: () {
-              Navigator.pop(context);
-              showBookDetails(context, ref, book);
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.drive_file_move_outline),
-            title: const Text('移动到分组'),
-            onTap: () async {
-              Navigator.pop(context);
-              final repo = ref.read(bookRepositoryProvider);
-              final groups = await repo.listGroups();
-              if (!context.mounted) return;
-              final result = await showDialog<String>(
-                context: context,
-                builder: (context) => GroupPickerDialog(
-                  groups: groups,
-                  initialGroup: book.groupName ?? '',
-                ),
-              );
-              if (result == null) return;
-              await repo.setGroup(book.id, result);
-            },
-          ),
-          if (onMultiSelect != null)
-            ListTile(
-              leading: const Icon(Icons.checklist),
-              title: const Text('批量管理'),
-              onTap: () {
-                Navigator.pop(context);
-                onMultiSelect();
-              },
-            ),
-          ListTile(
-            leading: Icon(
-              Icons.delete_outline,
-              color: Theme.of(context).colorScheme.error,
-            ),
-            title: Text(
-              '删除书籍',
-              style: TextStyle(color: Theme.of(context).colorScheme.error),
-            ),
-            onTap: () async {
-              Navigator.pop(context);
-              final confirmed = await showDialog<bool>(
-                context: context,
-                builder: (context) => AlertDialog(
-                  title: const Text('删除书籍'),
-                  content: Text('确定删除《${book.title}》？\n书籍文件、阅读进度与批注将一并删除。'),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Navigator.pop(context, false),
-                      child: const Text('取消'),
-                    ),
-                    FilledButton(
-                      style: FilledButton.styleFrom(
-                        backgroundColor: Theme.of(context).colorScheme.error,
-                      ),
-                      onPressed: () => Navigator.pop(context, true),
-                      child: const Text('删除'),
-                    ),
-                  ],
-                ),
-              );
-              if (confirmed == true) {
-                await ref
-                    .read(bookRepositoryProvider)
-                    .deleteBook(book.id, deleteManagedFile: true);
-              }
-            },
-          ),
-        ],
-      ),
-    ),
-  );
 }
 
 /// 书籍详情页：醒目的半屏弹层（封面 + 元数据 + 简介）

@@ -21,7 +21,11 @@ class HtmlLiteConverter {
   ///
   /// [anchors]: 元素 id → (块序号, 块内字符偏移)（可选输出）；
   /// [footnotesOut]: 脚注 id → 内容（可选输出）。
-  List<Block> convert(String html, {Map<String, (int, int)>? anchors, Map<String, Footnote>? footnotesOut}) {
+  List<Block> convert(
+    String html, {
+    Map<String, (int, int)>? anchors,
+    Map<String, Footnote>? footnotesOut,
+  }) {
     final doc = html_parser.parse(utf8.decode(utf8.encode(html)));
     final body = doc.body;
     if (body == null) return const [];
@@ -413,8 +417,8 @@ Block _paragraphOf(List<InlineRun> runs, int quoteDepth) =>
 /// 是则返回目标脚注 id（href 锚点，不含 #）；跨文件注标同样取其锚点，
 /// 内容在阅读器侧全书范围解析。
 String? _noterefTarget(dom.Element a) {
-  final epubType =
-      (a.attributes['epub:type'] ?? a.attributes['type'] ?? '').toLowerCase();
+  final epubType = (a.attributes['epub:type'] ?? a.attributes['type'] ?? '')
+      .toLowerCase();
   final cls = (a.attributes['class'] ?? '').toLowerCase();
   final isNoteref =
       epubType.contains('noteref') ||
@@ -497,7 +501,9 @@ List<InlineRun> _inlineRuns(dom.Node node) {
       }
       // 空注标（标记由 CSS ::before 生成）：渲染占位符保证可点
       if (marked.isEmpty) {
-        marked.add(InlineRun('*', flags: const {InlineFlag.noteref}, refId: refId));
+        marked.add(
+          InlineRun('*', flags: const {InlineFlag.noteref}, refId: refId),
+        );
       }
       return marked;
     }

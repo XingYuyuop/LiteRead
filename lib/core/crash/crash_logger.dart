@@ -21,12 +21,14 @@ class CrashLogger {
       final support = getApplicationSupportDirectory();
       // path_provider 返回 Future；这里用 then 异步补齐路径，
       // 在路径就绪前的崩溃走控制台（与 Flutter 默认行为一致）
-      support.then((dir) {
-        final logDir = Directory(p.join(dir.path, 'literead', 'logs'));
-        return logDir.create(recursive: true).then((_) {
-          _logPath = p.join(logDir.path, 'crash.log');
-        });
-      }).catchError((_) => null);
+      support
+          .then((dir) {
+            final logDir = Directory(p.join(dir.path, 'literead', 'logs'));
+            return logDir.create(recursive: true).then((_) {
+              _logPath = p.join(logDir.path, 'crash.log');
+            });
+          })
+          .catchError((_) => null);
     } catch (_) {}
 
     // Flutter 框架层错误（build/layout/paint 等回调抛出）
@@ -47,7 +49,11 @@ class CrashLogger {
 
     // Dart 未捕获异步异常（root zone 之外漏出的错误）
     PlatformDispatcher.instance.onError = (error, stack) {
-      _writeSync(kind: 'UNCAUGHT_ERROR', message: error.toString(), stack: stack);
+      _writeSync(
+        kind: 'UNCAUGHT_ERROR',
+        message: error.toString(),
+        stack: stack,
+      );
       // 返回 false：错误继续沿默认流程处理（保持崩溃语义，不吞错）
       return false;
     };
@@ -71,8 +77,10 @@ class CrashLogger {
         ..writeln('=' * 64)
         ..writeln('time   : ${DateTime.now().toIso8601String()}')
         ..writeln('kind   : $kind')
-        ..writeln('os     : ${Platform.operatingSystem} '
-            '${Platform.operatingSystemVersion}')
+        ..writeln(
+          'os     : ${Platform.operatingSystem} '
+          '${Platform.operatingSystemVersion}',
+        )
         ..writeln('version: ${Platform.version}');
       if (extra != null && extra.isNotEmpty) {
         buf.writeln(extra);

@@ -69,11 +69,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
                   ),
                   child: Column(
                     children: [
-                      Icon(
-                        Icons.timer_outlined,
-                        size: 32,
-                        color: cs.primary,
-                      ),
+                      Icon(Icons.timer_outlined, size: 32, color: cs.primary),
                       const SizedBox(height: 8),
                       Text(
                         formatDuration(_totalSeconds),
@@ -84,14 +80,11 @@ class _StatsPageState extends ConsumerState<StatsPage> {
                         ),
                       ),
                       const SizedBox(height: 4),
-                      Text(
-                        switch (_range) {
-                          _Range.today => '今日阅读时长',
-                          _Range.week => '近 7 天阅读时长',
-                          _Range.all => '累计阅读时长',
-                        },
-                        style: TextStyle(fontSize: 12, color: cs.outline),
-                      ),
+                      Text(switch (_range) {
+                        _Range.today => '今日阅读时长',
+                        _Range.week => '近 7 天阅读时长',
+                        _Range.all => '累计阅读时长',
+                      }, style: TextStyle(fontSize: 12, color: cs.outline)),
                     ],
                   ),
                 ),
@@ -182,10 +175,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
                             const SizedBox(height: 6),
                             Text(
                               '占比 ${(frac * 100).toStringAsFixed(0)}%',
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: cs.outline,
-                              ),
+                              style: TextStyle(fontSize: 11, color: cs.outline),
                             ),
                           ],
                         ),

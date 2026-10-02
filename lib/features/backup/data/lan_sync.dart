@@ -7,7 +7,6 @@ import 'package:drift/drift.dart' hide isNull;
 
 import '../../../core/storage/app_database.dart';
 import '../../library/data/book_repository.dart';
-import 'remote_store.dart';
 
 /// 局域网同步服务端口（发现 UDP 与 HTTP 服务共用同一端口段约定）
 const lanSyncPort = 47816;
@@ -50,17 +49,34 @@ Future<List<String>> localIPv4Addresses() async {
   return out;
 }
 
+/// 本机全部 IPv4 地址（含回环与虚拟网卡）：扫描结果据此过滤自身设备
+Future<Set<String>> allLocalIPv4s() async {
+  final out = <String>{'127.0.0.1'};
+  try {
+    for (final ni in await NetworkInterface.list()) {
+      for (final a in ni.addresses) {
+        if (a.type == InternetAddressType.IPv4) out.add(a.address);
+      }
+    }
+  } catch (_) {}
+  return out;
+}
+
 /// 局域网设备信息
 class LanDevice {
   const LanDevice({
     required this.address,
     required this.port,
     required this.name,
+    this.addrs = const [],
   });
 
   final String address;
   final int port;
   final String name;
+
+  /// 对端报告的本机全部地址（用于扫描端排除自身设备）
+  final List<String> addrs;
 }
 
 /// 局域网同步服务端：开放 HTTP 端口，供其他 LiteRead 设备扫描/拉取/推送。
@@ -117,6 +133,8 @@ class LanSyncServer {
 
     // UDP 发现应答
     try {
+      // 本机地址集在启动时取一次即可（服务运行期间网卡通常不变）
+      final localAddrs = (await allLocalIPv4s()).toList();
       _udp = await RawDatagramSocket.bind(
         InternetAddress.anyIPv4,
         lanSyncPort,
@@ -129,7 +147,12 @@ class LanSyncServer {
         final msg = utf8.decode(dg.data, allowMalformed: true);
         if (msg != 'LITEREAD_DISCOVER') return;
         final reply = utf8.encode(
-          jsonEncode({'app': 'literead', 'name': _deviceName(), 'port': port}),
+          jsonEncode({
+            'app': 'literead',
+            'name': _deviceName(),
+            'port': port,
+            'addrs': localAddrs,
+          }),
         );
         _udp!.send(reply, dg.address, dg.port);
       });
@@ -173,6 +196,7 @@ class LanSyncServer {
           'app': 'literead',
           'name': _deviceName(),
           'port': port,
+          'addrs': (await allLocalIPv4s()).toList(),
         });
         return;
       }
@@ -251,9 +275,7 @@ class LanSyncServer {
       return;
     }
     final tmpDir = await Directory.systemTemp.createTemp('literead_up');
-    final tmp = File(
-      '${tmpDir.path}${Platform.pathSeparator}up.$ext',
-    );
+    final tmp = File('${tmpDir.path}${Platform.pathSeparator}up.$ext');
     try {
       final sink = tmp.openWrite();
       await req.cast<List<int>>().pipe(sink);
@@ -306,11 +328,18 @@ class LanSyncServer {
     }
     return {
       'app': 'literead',
-      'formatVersion': 1,
+      'formatVersion': 2,
       'deviceName': _deviceName(),
       'createdAt': DateTime.now().millisecondsSinceEpoch,
       'settings': settings,
       'books': list,
+      // 附加数据全量快照（v2）：对端「从备份恢复」时可完整还原
+      'data': {
+        'highlights': await _repo.allHighlightRows(),
+        'bookmarks': await _repo.allBookmarkRows(),
+        'bookTags': await _repo.allBookTagRows(),
+        'readingTimes': await _repo.allReadingTimeRows(),
+      },
     };
   }
 
@@ -402,6 +431,16 @@ class LanSyncServer {
       final cov = await AppDirs.covers();
       final f = File('${cov.path}${Platform.pathSeparator}$name');
       await f.writeAsBytes(bytes, flush: true);
+      // 同步更新书籍行的封面路径：修复对端推送书籍后封面（插图）不显示
+      final bookId = name.substring(0, 64);
+      final row = await (_db.select(
+        _db.books,
+      )..where((t) => t.id.equals(bookId))).getSingleOrNull();
+      if (row != null && row.coverPath != f.path) {
+        await (_db.update(_db.books)..where((t) => t.id.equals(bookId))).write(
+          BooksCompanion(coverPath: Value(f.path)),
+        );
+      }
       return;
     }
     if (fp.startsWith('progress/') && fp.endsWith('.json')) {
@@ -428,6 +467,13 @@ class LanSyncServer {
     final libDir = await AppDirs.library();
     final managedPath =
         '${libDir.path}${Platform.pathSeparator}$id.${format.toLowerCase()}';
+    // 封面路径是确定性的（covers/<id>.img，随后由推送方上传该文件），
+    // 注册时即写入，避免推送方向对端同步书籍后对端封面（插图）不显示
+    String? coverPath;
+    if (entry['hasCover'] == true) {
+      final covDir = await AppDirs.covers();
+      coverPath = '${covDir.path}${Platform.pathSeparator}$id.img';
+    }
     await _repo.upsertBookRow(
       BooksCompanion.insert(
         id: id,
@@ -440,6 +486,7 @@ class LanSyncServer {
         author: Value(entry['author'] as String?),
         language: Value(entry['language'] as String?),
         fileSize: Value(entry['fileSize'] as int?),
+        coverPath: Value(coverPath),
         metaJson: Value(entry['metaJson'] as String?),
         groupName: Value(() {
           final g = entry['groupName'] as String?;
@@ -570,20 +617,6 @@ class LanScanner {
     return devices.values.toList();
   }
 
-  /// 本机全部 IPv4 地址（含回环）：扫描结果中据此过滤自身，
-  /// 避免广播环回导致本机以多个 IP 出现在设备列表
-  static Future<Set<String>> _localIPv4s() async {
-    final out = <String>{'127.0.0.1'};
-    try {
-      for (final ni in await NetworkInterface.list()) {
-        for (final a in ni.addresses) {
-          if (a.type == InternetAddressType.IPv4) out.add(a.address);
-        }
-      }
-    } catch (_) {}
-    return out;
-  }
-
   /// 是否虚拟/回环网卡（WSL、虚拟机、VPN TAP 等，子网内不会有同步设备）
   static bool _isVirtualInterface(String name) {
     final n = name.toLowerCase();
@@ -601,7 +634,7 @@ class LanScanner {
   /// UDP 广播发现
   static Future<List<LanDevice>> _udpScan() async {
     final out = <LanDevice>[];
-    final localIps = await _localIPv4s();
+    final localIps = await allLocalIPv4s();
     RawDatagramSocket? socket;
     try {
       socket = await RawDatagramSocket.bind(
@@ -637,6 +670,13 @@ class LanScanner {
               jsonDecode(utf8.decode(dg.data, allowMalformed: true))
                   as Map<String, dynamic>;
           if (j['app'] == 'literead') {
+            // 自排除：对端报告的任一地址与本机地址集有交集 → 是自身
+            //（应答源地址可能因路由/热点接口而与本机接口枚举不一致）
+            final reported = <String>{
+              for (final a in (j['addrs'] as List<dynamic>? ?? const []))
+                a as String,
+            };
+            if (reported.any(localIps.contains)) return;
             out.add(
               LanDevice(
                 address: dg.address.address,
@@ -663,7 +703,7 @@ class LanScanner {
   /// TCP 逐 IP 端口扫描本机所在 /24 网段（回退方案）
   static Future<List<LanDevice>> _tcpScan() async {
     final out = <LanDevice>[];
-    final localIps = await _localIPv4s();
+    final localIps = await allLocalIPv4s();
 
     // 收集全部物理网卡的 /24 网段前缀（排除虚拟网卡，网段去重）
     final prefixes = <String>{};
@@ -690,10 +730,11 @@ class LanScanner {
     Future<void> worker() async {
       while (index < candidates.length) {
         final ip = candidates[index++];
-        final name = await _probe(ip);
-        if (name != null) {
-          out.add(LanDevice(address: ip, port: lanSyncPort, name: name));
-        }
+        final device = await _probe(ip);
+        if (device == null) continue;
+        // 自排除：对端报告的地址与本机地址集有交集 → 是自身
+        if (device.addrs.any(localIps.contains)) continue;
+        out.add(device);
       }
     }
 
@@ -702,7 +743,7 @@ class LanScanner {
   }
 
   /// 探测单台设备：TCP 连上且 /api/ping 返回 literead 才算命中
-  static Future<String?> _probe(String ip) async {
+  static Future<LanDevice?> _probe(String ip) async {
     try {
       final socket = await Socket.connect(
         ip,
@@ -710,8 +751,7 @@ class LanScanner {
         timeout: const Duration(milliseconds: 300),
       );
       socket.destroy();
-      final name = await LanStorePing.ping(ip, lanSyncPort);
-      return name;
+      return await LanStorePing.ping(ip, lanSyncPort);
     } catch (_) {
       return null;
     }
@@ -720,6 +760,32 @@ class LanScanner {
 
 /// 独立的 ping 工具（避免与 LanStore 依赖循环）
 class LanStorePing {
-  static Future<String?> ping(String host, int port) =>
-      LanStore.ping(host, port);
+  /// 返回设备信息；非 LiteRead 设备或不可达时返回 null
+  static Future<LanDevice?> ping(String host, int port) async {
+    try {
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 3);
+      final req = await client.getUrl(Uri.parse('http://$host:$port/api/ping'));
+      final res = await req.close().timeout(const Duration(seconds: 5));
+      if (res.statusCode != 200) {
+        client.close();
+        return null;
+      }
+      final body = await res.transform(utf8.decoder).join();
+      client.close();
+      final j = jsonDecode(body) as Map<String, dynamic>;
+      if (j['app'] != 'literead') return null;
+      return LanDevice(
+        address: host,
+        port: j['port'] as int? ?? port,
+        name: j['name'] as String? ?? '未知设备',
+        addrs: [
+          for (final a in (j['addrs'] as List<dynamic>? ?? const []))
+            a as String,
+        ],
+      );
+    } catch (_) {
+      return null;
+    }
+  }
 }

@@ -6,13 +6,18 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
-// 签名配置：android/key.properties（不入库，本地或 CI 生成）
-// 缺失时回退 debug 签名，保证本地 --release 可构建
+// 签名配置优先级：
+// 1. android/key.properties（本地/CI 注入，不入库）
+// 2. 仓库内置 android/app/literead-release.jks（固定发布密钥，保证历次 CI
+//    构建签名一致，旧版本可直接覆盖安装更新）
+// 3. debug 签名（仅本地无密钥时兜底）
 val keystoreProperties = Properties()
 val keystorePropertiesFile = rootProject.file("key.properties")
 if (keystorePropertiesFile.exists()) {
     keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
 }
+
+val bundledKeystore = file("literead-release.jks")
 
 android {
     namespace = "dev.literead.literead"
@@ -41,14 +46,19 @@ android {
                 storeFile = file(keystoreProperties["storeFile"] as String)
                 storePassword = keystoreProperties["storePassword"] as String
             }
+        } else if (bundledKeystore.exists()) {
+            create("release") {
+                keyAlias = "literead"
+                keyPassword = "LiteRead2026!"
+                storeFile = bundledKeystore
+                storePassword = "LiteRead2026!"
+            }
         }
     }
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = if (keystorePropertiesFile.exists()) {
+            signingConfig = if (keystorePropertiesFile.exists() || bundledKeystore.exists()) {
                 signingConfigs.getByName("release")
             } else {
                 signingConfigs.getByName("debug")

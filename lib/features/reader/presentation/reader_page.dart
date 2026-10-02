@@ -12,6 +12,7 @@ import 'package:window_manager/window_manager.dart';
 import '../../../app/theme_controller.dart';
 import '../../../core/storage/app_database.dart';
 import '../../../core/theme/reader_theme.dart';
+import '../../../core/ui/app_snackbar.dart';
 import '../../../engine/ir/book_document.dart'
     show BookDocument, Footnote, Locator, TocEntry;
 import '../../../engine/pagination/text_paginator.dart';
@@ -134,9 +135,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
       _lastThemeId = effSpec.id;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
-          ref
-              .read(readerControllerProvider.notifier)
-              .updateTheme(effSpec);
+          ref.read(readerControllerProvider.notifier).updateTheme(effSpec);
         }
       });
     }
@@ -470,9 +469,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     final data = await doc.resources.get(src);
     if (data == null || data.isEmpty) {
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('图片资源加载失败')));
+        showAppSnackBar(context, '图片资源加载失败');
       }
       return;
     }
@@ -774,11 +771,10 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     final text = _selectedText;
     if (text != null) {
       Clipboard.setData(ClipboardData(text: text));
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('已复制'),
-          duration: Duration(milliseconds: 800),
-        ),
+      showAppSnackBar(
+        context,
+        '已复制',
+        duration: const Duration(milliseconds: 800),
       );
     }
     _clearSelection();
@@ -1760,15 +1756,11 @@ class _ImageViewerDialog extends StatelessWidget {
     try {
       await File(path).writeAsBytes(bytes, flush: true);
       if (context.mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('已保存到 $path')));
+        showAppSnackBar(context, '已保存到 $path');
       }
     } catch (e) {
       if (context.mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('保存失败：$e')));
+        showAppSnackBar(context, '保存失败：$e');
       }
     }
   }

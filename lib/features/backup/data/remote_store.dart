@@ -54,6 +54,11 @@ class LocalFolderStore extends RemoteStore {
 
   @override
   Future<void> ensureDir(String path) async {
+    if (path.isEmpty) {
+      // 根目录：备份目标不存在时自动创建
+      await root.create(recursive: true);
+      return;
+    }
     await Directory(_local(path)).create(recursive: true);
   }
 
@@ -149,8 +154,10 @@ class WebDavStore extends RemoteStore {
 
   @override
   Future<void> ensureDir(String path) async {
-    // 逐级 MKCOL（已存在 405 视为成功）
-    final segs = path.split('/').where((s) => s.isNotEmpty).toList();
+    // 逐级 MKCOL（已存在 405 视为成功）；path 为空时创建根文件夹
+    final segs = path.isEmpty
+        ? [rootFolder]
+        : path.split('/').where((s) => s.isNotEmpty).toList();
     var cur = '';
     for (final s in segs) {
       cur = cur.isEmpty ? s : '$cur/$s';

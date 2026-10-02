@@ -176,6 +176,10 @@ jobs:
             echo "- 完整性校验见 \`SHA256SUMS.txt\`"
             echo ""
             echo "> Windows SmartScreen 可能对未签名程序弹窗，点击「仍要运行」即可（计划书 R4）。"
+            echo ""
+            echo "### 注意事项"
+            echo "- v1.0.3 起改用固定签名密钥。若此前安装的是 **v1.0.2 及更早版本**（临时签名），"
+            echo "  覆盖安装会提示「签名不一致」，请先卸载旧版再安装本版本（数据可在新版本内通过「备份与恢复」迁移）。"
           } > release-body.md
       - uses: softprops/action-gh-release@v2
         with:

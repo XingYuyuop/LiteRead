@@ -561,7 +561,6 @@ class _HuffCdic {
   static int _u64(ByteData bd, int o) => bd.getUint64(o);
 }
 
-
 /// UTF-8 容错解码（坏字节替换为 U+FFFD，不抛异常）
 String utf8DecodeBestEffort(List<int> data) {
   final out = StringBuffer();

@@ -289,6 +289,155 @@ class BookRepository {
     return {for (final r in rows) r.key: r.valueJson};
   }
 
+  // ---- 全量附加数据（备份/恢复用：标注/书签/标签/阅读统计） ----
+
+  /// 全部标注行（含 deleted，用于多端合并删除语义）
+  Future<List<Map<String, dynamic>>> allHighlightRows() async {
+    final rows = await _db.select(_db.highlights).get();
+    return [
+      for (final r in rows)
+        {
+          'id': r.id,
+          'bookId': r.bookId,
+          'locatorJson': r.locatorJson,
+          'selectedText': r.selectedText,
+          'colorIndex': r.colorIndex,
+          'styleIndex': r.styleIndex,
+          'note': r.note,
+          'createdAt': r.createdAt,
+          'updatedAt': r.updatedAt,
+          'deleted': r.deleted,
+        },
+    ];
+  }
+
+  /// 全部书签行
+  Future<List<Map<String, dynamic>>> allBookmarkRows() async {
+    final rows = await _db.select(_db.bookmarks).get();
+    return [
+      for (final r in rows)
+        {
+          'id': r.id,
+          'bookId': r.bookId,
+          'locatorJson': r.locatorJson,
+          'title': r.title,
+          'createdAt': r.createdAt,
+        },
+    ];
+  }
+
+  /// 全部书籍标签
+  Future<List<Map<String, dynamic>>> allBookTagRows() async {
+    final rows = await _db.select(_db.bookTags).get();
+    return [
+      for (final r in rows) {'bookId': r.bookId, 'tag': r.tag},
+    ];
+  }
+
+  /// 全部阅读统计行
+  Future<List<Map<String, dynamic>>> allReadingTimeRows() async {
+    final rows = await _db.select(_db.readingTimes).get();
+    return [
+      for (final r in rows)
+        {'bookId': r.bookId, 'day': r.day, 'seconds': r.seconds},
+    ];
+  }
+
+  /// 恢复标注：按 updatedAt 新者胜（含删除标记）
+  Future<void> restoreHighlights(List<Map<String, dynamic>> items) async {
+    for (final j in items) {
+      final id = j['id'] as String?;
+      if (id == null) continue;
+      final remoteUpdated = j['updatedAt'] as int? ?? 0;
+      final local = await (_db.select(
+        _db.highlights,
+      )..where((t) => t.id.equals(id))).getSingleOrNull();
+      if (local != null && local.updatedAt >= remoteUpdated) continue;
+      await _db
+          .into(_db.highlights)
+          .insertOnConflictUpdate(
+            HighlightsCompanion.insert(
+              id: id,
+              bookId: j['bookId'] as String? ?? '',
+              locatorJson: j['locatorJson'] as String? ?? '{}',
+              selectedText: j['selectedText'] as String? ?? '',
+              colorIndex: j['colorIndex'] as int? ?? 0,
+              createdAt: j['createdAt'] as int? ?? 0,
+              updatedAt: remoteUpdated,
+            ).copyWith(
+              styleIndex: Value(j['styleIndex'] as int? ?? 0),
+              note: Value(j['note'] as String?),
+              deleted: Value(j['deleted'] as bool? ?? false),
+            ),
+          );
+    }
+  }
+
+  /// 恢复书签：本机缺失才插入
+  Future<void> restoreBookmarks(List<Map<String, dynamic>> items) async {
+    for (final j in items) {
+      final id = j['id'] as String?;
+      if (id == null) continue;
+      final exists = await (_db.select(
+        _db.bookmarks,
+      )..where((t) => t.id.equals(id))).getSingleOrNull();
+      if (exists != null) continue;
+      await _db
+          .into(_db.bookmarks)
+          .insert(
+            BookmarksCompanion.insert(
+              id: id,
+              bookId: j['bookId'] as String? ?? '',
+              locatorJson: j['locatorJson'] as String? ?? '{}',
+              createdAt: j['createdAt'] as int? ?? 0,
+            ).copyWith(title: Value(j['title'] as String?)),
+          );
+    }
+  }
+
+  /// 恢复书籍标签：按 (bookId, tag) 缺失才插入
+  Future<void> restoreBookTags(List<Map<String, dynamic>> items) async {
+    for (final j in items) {
+      final bookId = j['bookId'] as String?;
+      final tag = j['tag'] as String?;
+      if (bookId == null || tag == null || bookId.isEmpty || tag.isEmpty) {
+        continue;
+      }
+      final exists =
+          await (_db.select(_db.bookTags)
+                ..where((t) => t.bookId.equals(bookId) & t.tag.equals(tag)))
+              .getSingleOrNull();
+      if (exists != null) continue;
+      await _db
+          .into(_db.bookTags)
+          .insert(BookTagsCompanion.insert(bookId: bookId, tag: tag));
+    }
+  }
+
+  /// 恢复阅读统计：按 (bookId, day) 取较大秒数
+  Future<void> restoreReadingTimes(List<Map<String, dynamic>> items) async {
+    for (final j in items) {
+      final bookId = j['bookId'] as String?;
+      final day = j['day'] as String?;
+      final seconds = j['seconds'] as int? ?? 0;
+      if (bookId == null || day == null || seconds <= 0) continue;
+      final local =
+          await (_db.select(_db.readingTimes)
+                ..where((t) => t.bookId.equals(bookId) & t.day.equals(day)))
+              .getSingleOrNull();
+      if (local != null && local.seconds >= seconds) continue;
+      await _db
+          .into(_db.readingTimes)
+          .insertOnConflictUpdate(
+            ReadingTimesCompanion.insert(
+              bookId: bookId,
+              day: day,
+              seconds: Value(seconds),
+            ),
+          );
+    }
+  }
+
   Future<void> saveProgress(
     String bookId,
     Locator locator,
@@ -450,8 +599,7 @@ class ImportOutcome {
 class _DigestSink implements Sink<Digest> {
   Digest? _digest;
 
-  Digest get digest =>
-      _digest ?? (throw StateError('哈希尚未完成（未调用 close）'));
+  Digest get digest => _digest ?? (throw StateError('哈希尚未完成（未调用 close）'));
 
   @override
   void add(Digest data) => _digest = data;

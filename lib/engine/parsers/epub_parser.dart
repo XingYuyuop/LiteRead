@@ -196,7 +196,12 @@ class EpubParser {
       final heading = _firstHeading(doc);
       if (heading != null) {
         chapters.add(
-          Chapter(id: href, title: heading, blocks: blocks, footnotes: footnotes),
+          Chapter(
+            id: href,
+            title: heading,
+            blocks: blocks,
+            footnotes: footnotes,
+          ),
         );
       } else {
         noHeadingIndices.add(chapters.length);
@@ -217,13 +222,17 @@ class EpubParser {
     if (navHref != null) {
       final navData = manifestResource(navHref);
       if (navData != null) {
-        toc.addAll(_parseNav(_decodeText(navData), spineHrefs, chapters, anchorMaps));
+        toc.addAll(
+          _parseNav(_decodeText(navData), spineHrefs, chapters, anchorMaps),
+        );
       }
     }
     if (toc.isEmpty && ncxHref != null) {
       final ncxData = manifestResource(ncxHref);
       if (ncxData != null) {
-        toc.addAll(_parseNcx(_decodeText(ncxData), spineHrefs, chapters, anchorMaps));
+        toc.addAll(
+          _parseNcx(_decodeText(ncxData), spineHrefs, chapters, anchorMaps),
+        );
       }
     }
     if (toc.isEmpty) {
@@ -325,12 +334,7 @@ class EpubParser {
               TocEntry(
                 title: title,
                 spineIndex: idx,
-                charOffset: _anchorOffset(
-                  href,
-                  chapters,
-                  anchorMaps,
-                  idx,
-                ),
+                charOffset: _anchorOffset(href, chapters, anchorMaps, idx),
                 depth: depth,
               ),
             );

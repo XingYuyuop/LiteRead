@@ -12,3 +12,5 @@ GeneratedPluginRegistrant.java
 key.properties
 **/*.keystore
 **/*.jks
+# 例外：固定发布密钥需入库，保证历次 CI 构建签名一致（旧版本可覆盖安装更新）
+!/app/literead-release.jks

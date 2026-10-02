@@ -513,7 +513,10 @@ class ReaderController extends Notifier<ReaderState> {
 
   /// 结算自上次心跳以来的阅读时长写入统计表。
   /// [bookId] 缺省取当前书；[keepClock] 为 false 时结算后不重置起点（退出场景）。
-  Future<void> _flushReadingTime({String? bookId, bool keepClock = true}) async {
+  Future<void> _flushReadingTime({
+    String? bookId,
+    bool keepClock = true,
+  }) async {
     final start = _readingStart;
     if (start == null) return;
     final id = bookId ?? state.book?.id;

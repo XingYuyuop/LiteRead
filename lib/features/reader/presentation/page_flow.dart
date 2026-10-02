@@ -97,10 +97,10 @@ class PageCanvas extends StatelessWidget {
           : lb.spaceAbove;
       total +=
           spaceAbove +
-          lb.lineHeights.skip(unit.firstLine).take(unit.lineCount).fold(
-            0.0,
-            (a, b) => a + b,
-          );
+          lb.lineHeights
+              .skip(unit.firstLine)
+              .take(unit.lineCount)
+              .fold(0.0, (a, b) => a + b);
     }
     final free = laid.config.contentHeight - total;
     return free > 0 ? free / 2 : 0;
@@ -558,7 +558,10 @@ class _PagePainter extends CustomPainter {
     }
     // 加载占位：圆角浅色卡片 + 居中加载环（与成品图同样的 aspect-fit 区域）
     final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(8));
-    canvas.drawRRect(rrect, Paint()..color = theme.secondary.withValues(alpha: 0.08));
+    canvas.drawRRect(
+      rrect,
+      Paint()..color = theme.secondary.withValues(alpha: 0.08),
+    );
     canvas.drawRRect(
       rrect,
       Paint()
@@ -835,7 +838,9 @@ class _PageFlowState extends State<PageFlow>
             if (!hasOutgoing && t == 0) {
               return RepaintBoundary(child: widget.buildPage());
             }
-            if (!hasOutgoing && _dragging && widget.animType != PageTurnType.none) {
+            if (!hasOutgoing &&
+                _dragging &&
+                widget.animType != PageTurnType.none) {
               // 拖拽反馈与松手后的动画状态无缝衔接（进度同为 t，松手不跳变）：
               // - 平移：当前页跟手全幅位移（松手后即为动画中旧页位置）
               // - 覆盖-前进：当前页=底层页，视差左移 + 渐暗（松手后新页自右缘盖入）
@@ -943,8 +948,7 @@ class _StackPages extends StatelessWidget {
         // 顶层页：前进时从右缘外滑入（1→0），后退时从 0 滑回右缘外（0→1）
         final topOffset = dir > 0 ? (1 - t) * width : t * width;
         // 底层页：前进 0→-20%，后退 -20%→0（视差跟随）
-        final underOffset =
-            -_coverParallax * (dir > 0 ? t : 1 - t) * width;
+        final underOffset = -_coverParallax * (dir > 0 ? t : 1 - t) * width;
         // 底层页压暗：进度越深越暗，随覆盖完成收敛
         final dim = _coverDim * (dir > 0 ? t : 1 - t);
         return Stack(
@@ -959,9 +963,7 @@ class _StackPages extends StatelessWidget {
             if (dim > 0.001)
               Positioned.fill(
                 child: IgnorePointer(
-                  child: ColoredBox(
-                    color: Colors.black.withValues(alpha: dim),
-                  ),
+                  child: ColoredBox(color: Colors.black.withValues(alpha: dim)),
                 ),
               ),
             Positioned.fill(
@@ -1065,7 +1067,8 @@ class _PageAnimPreviewState extends State<PageAnimPreview>
               ? ((_ctrl.value > 0.5) ? 1.0 : 0.0)
               : _ctrl.value;
           Widget page() => _miniPage(2, cs.surfaceContainerHighest, cs.primary);
-          Widget oldPage() => _miniPage(1, cs.surfaceContainerHigh, cs.onSurface);
+          Widget oldPage() =>
+              _miniPage(1, cs.surfaceContainerHigh, cs.onSurface);
           return ClipRRect(
             borderRadius: BorderRadius.circular(10),
             child: SizedBox(

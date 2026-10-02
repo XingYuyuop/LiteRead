@@ -1,14 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../ui/app_snackbar.dart';
+import 'app_updater.dart';
 import 'update_service.dart';
 
 /// 更新提示弹窗（设置页手动检查与启动自动检查共用）：
-/// 版本号对比 + 更新日志 + 前往下载
-Future<void> showUpdateFoundDialog(
-  BuildContext context,
-  UpdateInfo info,
-) {
+/// 版本号对比 + 更新日志 + 应用内直接更新
+Future<void> showUpdateFoundDialog(BuildContext context, UpdateInfo info) {
   return showDialog<void>(
     context: context,
     builder: (context) => AlertDialog(
@@ -54,22 +53,22 @@ Future<void> showUpdateFoundDialog(
         ),
         FilledButton.icon(
           onPressed: () async {
-            final url = info.releaseUrl;
             Navigator.pop(context);
-            try {
-              await openReleasePage(url);
-            } catch (_) {
-              // 无法自动打开浏览器 → 复制链接兜底
-              await Clipboard.setData(ClipboardData(text: url));
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('下载链接已复制：$url')),
-                );
+            // 应用内直接更新（下载 → 安装/替换）；无匹配附件时回退浏览器
+            final started = await runInAppUpdate(context, info);
+            if (!started && context.mounted) {
+              try {
+                await openReleasePage(info.releaseUrl);
+              } catch (_) {
+                await Clipboard.setData(ClipboardData(text: info.releaseUrl));
+                if (context.mounted) {
+                  showAppSnackBar(context, '下载链接已复制：${info.releaseUrl}');
+                }
               }
             }
           },
           icon: const Icon(Icons.download_outlined, size: 18),
-          label: const Text('前往下载'),
+          label: const Text('直接更新'),
         ),
       ],
     ),

@@ -7,9 +7,9 @@ import '../../../core/storage/app_database.dart';
 import '../../library/data/book_repository.dart';
 import 'remote_store.dart';
 
-/// 备份清单（设置 + 书籍清单元数据；书籍文件与进度分目录单独存放）
+/// 备份清单（设置 + 书籍清单元数据 + 附加数据快照；书籍文件与进度分目录单独存放）
 ///
-/// 目录结构（根目录名可自定义，默认 literead）：
+/// 目录结构（根目录名可自定义，默认 LiteRead）：
 /// ```
 /// <根目录>/
 ///   backup_<设备名>_<yyyyMMdd_HHmmss>.json   ← 本清单（含设备名、日期时间）
@@ -23,9 +23,11 @@ class BackupManifest {
     required this.createdAt,
     required this.settings,
     required this.books,
+    this.data = const {},
   });
 
-  static const formatVersion = 1;
+  /// v2：新增 data（标注/书签/标签/阅读统计全量快照）
+  static const formatVersion = 2;
 
   final String deviceName;
   final int createdAt;
@@ -36,6 +38,10 @@ class BackupManifest {
   /// 书籍清单（只记录有哪些书，文件单独存放于 book/）
   final List<Map<String, dynamic>> books;
 
+  /// 附加数据全量快照（v2）：
+  /// highlights / bookmarks / bookTags / readingTimes → 行列表
+  final Map<String, List<Map<String, dynamic>>> data;
+
   Map<String, dynamic> toJson() => {
     'app': 'literead',
     'formatVersion': formatVersion,
@@ -43,6 +49,7 @@ class BackupManifest {
     'createdAt': createdAt,
     'settings': settings,
     'books': books,
+    'data': data,
   };
 
   static BackupManifest fromJson(Map<String, dynamic> j) => BackupManifest(
@@ -54,6 +61,14 @@ class BackupManifest {
     books: (j['books'] as List<dynamic>? ?? const [])
         .whereType<Map<String, dynamic>>()
         .toList(),
+    data: (j['data'] as Map<String, dynamic>? ?? const {}).map(
+      (k, v) => MapEntry(
+        k,
+        (v as List<dynamic>? ?? const [])
+            .whereType<Map<String, dynamic>>()
+            .toList(),
+      ),
+    ),
   );
 
   /// 清单文件名：`backup_<设备名>_<yyyyMMdd_HHmmss>.json`
@@ -66,6 +81,49 @@ class BackupManifest {
   }
 
   static String _p2(int v) => v.toString().padLeft(2, '0');
+}
+
+/// 备份选项：忽略列表（用户可选择某些数据不参与备份/恢复）
+class BackupOptions {
+  const BackupOptions({
+    this.ignoreTheme = false,
+    this.ignoreReader = false,
+    this.ignoreStats = false,
+    this.ignoreBackupCfg = false,
+  });
+
+  /// 忽略主题设置（app.theme）
+  final bool ignoreTheme;
+
+  /// 忽略阅读界面设置（reader.settings）
+  final bool ignoreReader;
+
+  /// 忽略阅读统计（readingTimes 数据）
+  final bool ignoreStats;
+
+  /// 忽略本机备份配置（backup.config 等，避免覆盖新设备已填写的备份目标）
+  final bool ignoreBackupCfg;
+
+  /// 按忽略列表过滤设置键
+  Map<String, String> filterSettings(Map<String, String> all) {
+    if (!ignoreTheme && !ignoreReader && !ignoreBackupCfg) return all;
+    bool keep(String key) {
+      if (ignoreTheme && key == 'app.theme') return false;
+      if (ignoreReader && key == 'reader.settings') return false;
+      if (ignoreBackupCfg &&
+          (key == 'backup.config' ||
+              key == 'backup.folderName' ||
+              key == 'backup.lanSharing')) {
+        return false;
+      }
+      return true;
+    }
+
+    return {
+      for (final e in all.entries)
+        if (keep(e.key)) e.key: e.value,
+    };
+  }
 }
 
 /// 同步/恢复结果统计
@@ -173,23 +231,32 @@ class BackupService {
     return out;
   }
 
-  /// 生成清单（设置 + 书籍）
-  Future<BackupManifest> buildManifest() async {
+  /// 生成清单（设置 + 书籍 + 附加数据快照，按忽略列表过滤）
+  Future<BackupManifest> buildManifest({
+    BackupOptions opts = const BackupOptions(),
+  }) async {
     final books = await _repo.listBooks();
     return BackupManifest(
       deviceName: _deviceName(),
       createdAt: DateTime.now().millisecondsSinceEpoch,
-      settings: await _repo.allSettings(),
+      settings: opts.filterSettings(await _repo.allSettings()),
       books: await manifestBooks(books),
+      data: {
+        'highlights': await _repo.allHighlightRows(),
+        'bookmarks': await _repo.allBookmarkRows(),
+        'bookTags': await _repo.allBookTagRows(),
+        if (!opts.ignoreStats) 'readingTimes': await _repo.allReadingTimeRows(),
+      },
     );
   }
 
   // ---- 备份（推送到远端） ----
 
-  /// 立即备份：上传缺失的书籍/封面 + 全部进度 + 新清单
+  /// 立即备份：上传缺失的书籍/封面 + 全部进度 + 新清单（含标注/统计等全量数据）
   Future<BackupResult> backup(
     RemoteStore store, {
     BackupProgressCallback? onProgress,
+    BackupOptions opts = const BackupOptions(),
   }) async {
     final r = BackupResult();
     await _ensureDirs(store);
@@ -245,7 +312,7 @@ class BackupService {
 
     // 清单
     onProgress?.call(done, total, '写入清单');
-    final manifest = await buildManifest();
+    final manifest = await buildManifest(opts: opts);
     final name = BackupManifest.fileNameFor(
       manifest.deviceName,
       DateTime.now(),
@@ -265,6 +332,7 @@ class BackupService {
   Future<BackupResult> sync(
     RemoteStore store, {
     BackupProgressCallback? onProgress,
+    BackupOptions opts = const BackupOptions(),
   }) async {
     final r = BackupResult();
     await _ensureDirs(store);
@@ -281,7 +349,9 @@ class BackupService {
     final toDownload = remoteBooks.values
         .where((e) => _bookById(localBooks, e['id'] as String) == null)
         .toList();
-    final toPush = localBooks.where((b) => !remoteBooks.containsKey(b.id)).toList();
+    final toPush = localBooks
+        .where((b) => !remoteBooks.containsKey(b.id))
+        .toList();
     final total = toDownload.length + toPush.length + 2; // + 进度合并 + 清单
     var done = 0;
     void step(String phase) => onProgress?.call(++done, total, phase);
@@ -308,7 +378,7 @@ class BackupService {
 
     // 4. 上传本机最新清单（供其他设备检索）
     onProgress?.call(done, total, '写入清单');
-    final manifest = await buildManifest();
+    final manifest = await buildManifest(opts: opts);
     final name = BackupManifest.fileNameFor(
       manifest.deviceName,
       DateTime.now(),
@@ -417,11 +487,12 @@ class BackupService {
   Future<List<(String, BackupManifest)>> listManifests(RemoteStore store) =>
       _fetchAllManifests(store);
 
-  /// 从指定清单恢复（默认最新）：应用设置 + 补齐书籍 + 进度合并
+  /// 从指定清单恢复（默认最新）：应用设置 + 补齐书籍 + 进度合并 + 标注/统计恢复
   Future<BackupResult> restore(
     RemoteStore store, {
     String? manifestName,
     BackupProgressCallback? onProgress,
+    BackupOptions opts = const BackupOptions(),
   }) async {
     final r = BackupResult();
     await _ensureDirs(store);
@@ -449,8 +520,8 @@ class BackupService {
       jsonDecode(utf8.decode(raw)) as Map<String, dynamic>,
     );
 
-    // 1. 应用设置
-    for (final e in manifest.settings.entries) {
+    // 1. 应用设置（按忽略列表过滤，例如保留本机主题/备份目标）
+    for (final e in opts.filterSettings(manifest.settings).entries) {
       await _db.setSetting(e.key, e.value);
     }
     r.settingsRestored = true;
@@ -463,7 +534,7 @@ class BackupService {
       final existing = await _repo.getBook(id);
       if (existing == null) missing.add(entry);
     }
-    final total = missing.length + 1; // + 进度合并
+    final total = missing.length + 2; // + 进度合并 + 附加数据恢复
     var done = 0;
     for (final entry in missing) {
       onProgress?.call(done, total, '下载 ${entry['title'] ?? '书籍'}');
@@ -474,6 +545,17 @@ class BackupService {
     // 3. 进度合并（本机缺失或远端更新才应用）
     onProgress?.call(done, total, '合并进度');
     await _mergeProgress(store, r);
+    done++;
+
+    // 4. 恢复附加数据：标注/书签/标签/阅读统计（按各自合并规则）
+    onProgress?.call(done, total, '恢复标注与统计');
+    final data = manifest.data;
+    await _repo.restoreHighlights(data['highlights'] ?? const []);
+    await _repo.restoreBookmarks(data['bookmarks'] ?? const []);
+    await _repo.restoreBookTags(data['bookTags'] ?? const []);
+    if (!opts.ignoreStats) {
+      await _repo.restoreReadingTimes(data['readingTimes'] ?? const []);
+    }
     onProgress?.call(total, total, '完成');
     r.manifestName = chosenName;
     return r;
@@ -482,6 +564,8 @@ class BackupService {
   // ---- 内部实现 ----
 
   Future<void> _ensureDirs(RemoteStore store) async {
+    // 根目录（备份目标不存在时自动创建，如 WebDAV/LiteRead 文件夹）
+    await store.ensureDir('');
     await store.ensureDir('book');
     await store.ensureDir('progress');
     await store.ensureDir('covers');

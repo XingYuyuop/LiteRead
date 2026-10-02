@@ -49,6 +49,8 @@ app.*.map.json
 /android/key.properties
 *.jks
 *.keystore
+# 例外：固定发布密钥需入库，保证历次 CI 构建签名一致（旧版本可覆盖安装更新）
+!/android/app/literead-release.jks
 
 # 本地构建产物（正式发布走 release.yml 云端构建）
 /dist/

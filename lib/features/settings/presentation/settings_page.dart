@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import '../../../app/theme_controller.dart';
 import '../../../core/crash/crash_logger.dart';
 import '../../../core/theme/reader_theme.dart';
+import '../../../core/ui/app_snackbar.dart';
 import '../../../core/update/update_service.dart';
 import '../../../core/update/update_ui.dart';
 import '../../reader/logic/reader_settings.dart';
@@ -225,16 +226,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     if (!context.mounted) return;
 
     if (error != null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('检查更新失败：$error')),
-      );
+      showAppSnackBar(context, '检查更新失败：$error');
       return;
     }
     if (info == null) return;
     if (!info.isNewer) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('已是最新版本（v$kAppVersion）')),
-      );
+      showAppSnackBar(context, '已是最新版本（v$kAppVersion）');
       return;
     }
     await showUpdateFoundDialog(context, info);
@@ -283,9 +280,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               onPressed: () async {
                 await Clipboard.setData(ClipboardData(text: text));
                 if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('崩溃日志已复制到剪贴板')),
-                  );
+                  showAppSnackBar(context, '崩溃日志已复制到剪贴板');
                 }
               },
               child: const Text('复制'),

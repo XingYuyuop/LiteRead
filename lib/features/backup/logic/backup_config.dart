@@ -24,7 +24,7 @@ extension BackupTargetTypeX on BackupTargetType {
 /// 备份配置（持久化于 settings_kv：'backup.folderName' / 'backup.config'）
 class BackupConfig {
   const BackupConfig({
-    this.folderName = 'literead',
+    this.folderName = 'LiteRead',
     this.type = BackupTargetType.local,
     this.localPath = '',
     this.webdavUrl = '',
@@ -38,6 +38,10 @@ class BackupConfig {
     this.s3PathStyle = true,
     this.lanAddress = '',
     this.lanPort = lanSyncPort,
+    this.ignoreTheme = false,
+    this.ignoreReader = false,
+    this.ignoreStats = false,
+    this.ignoreBackupCfg = false,
   });
 
   /// 备份根目录名（备份文件在其下，book/、progress/、covers/ 子目录也在这里）
@@ -64,6 +68,20 @@ class BackupConfig {
   final String lanAddress;
   final int lanPort;
 
+  // 忽略列表：这些数据不参与备份/恢复
+  final bool ignoreTheme; // 主题设置
+  final bool ignoreReader; // 阅读界面设置
+  final bool ignoreStats; // 阅读统计
+  final bool ignoreBackupCfg; // 本机备份目标配置
+
+  /// 转为备份服务选项
+  BackupOptions toOptions() => BackupOptions(
+    ignoreTheme: ignoreTheme,
+    ignoreReader: ignoreReader,
+    ignoreStats: ignoreStats,
+    ignoreBackupCfg: ignoreBackupCfg,
+  );
+
   BackupConfig copyWith({
     String? folderName,
     BackupTargetType? type,
@@ -79,6 +97,10 @@ class BackupConfig {
     bool? s3PathStyle,
     String? lanAddress,
     int? lanPort,
+    bool? ignoreTheme,
+    bool? ignoreReader,
+    bool? ignoreStats,
+    bool? ignoreBackupCfg,
   }) => BackupConfig(
     folderName: folderName ?? this.folderName,
     type: type ?? this.type,
@@ -94,6 +116,10 @@ class BackupConfig {
     s3PathStyle: s3PathStyle ?? this.s3PathStyle,
     lanAddress: lanAddress ?? this.lanAddress,
     lanPort: lanPort ?? this.lanPort,
+    ignoreTheme: ignoreTheme ?? this.ignoreTheme,
+    ignoreReader: ignoreReader ?? this.ignoreReader,
+    ignoreStats: ignoreStats ?? this.ignoreStats,
+    ignoreBackupCfg: ignoreBackupCfg ?? this.ignoreBackupCfg,
   );
 
   Map<String, dynamic> toJson() => {
@@ -111,10 +137,14 @@ class BackupConfig {
     's3PathStyle': s3PathStyle,
     'lanAddress': lanAddress,
     'lanPort': lanPort,
+    'ignoreTheme': ignoreTheme,
+    'ignoreReader': ignoreReader,
+    'ignoreStats': ignoreStats,
+    'ignoreBackupCfg': ignoreBackupCfg,
   };
 
   static BackupConfig fromJson(Map<String, dynamic> j) => BackupConfig(
-    folderName: j['folderName'] as String? ?? 'literead',
+    folderName: j['folderName'] as String? ?? 'LiteRead',
     type:
         BackupTargetType.values.asNameMap()[j['type']] ??
         BackupTargetType.local,
@@ -130,6 +160,10 @@ class BackupConfig {
     s3PathStyle: j['s3PathStyle'] as bool? ?? true,
     lanAddress: j['lanAddress'] as String? ?? '',
     lanPort: j['lanPort'] as int? ?? lanSyncPort,
+    ignoreTheme: j['ignoreTheme'] as bool? ?? false,
+    ignoreReader: j['ignoreReader'] as bool? ?? false,
+    ignoreStats: j['ignoreStats'] as bool? ?? false,
+    ignoreBackupCfg: j['ignoreBackupCfg'] as bool? ?? false,
   );
 
   static const _keyConfig = 'backup.config';

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../app/theme_controller.dart';
+import '../../../core/ui/app_snackbar.dart';
 import '../data/backup_service.dart';
 import '../data/lan_sync.dart';
 import '../data/remote_store.dart';
@@ -97,11 +98,11 @@ class _BackupPageState extends ConsumerState<BackupPage> {
 
   void _toast(String msg) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    showAppSnackBar(context, msg);
   }
 
   String get _rootName =>
-      _cfg.folderName.trim().isEmpty ? 'literead' : _cfg.folderName.trim();
+      _cfg.folderName.trim().isEmpty ? 'LiteRead' : _cfg.folderName.trim();
 
   /// 按当前配置构建存储目标；配置不完整时提示并返回 null
   RemoteStore? _safeStore() {
@@ -163,6 +164,9 @@ class _BackupPageState extends ConsumerState<BackupPage> {
     });
   };
 
+  /// 当前忽略列表选项
+  BackupOptions get _opts => _cfg.toOptions();
+
   void _resetProgress() {
     _opDone = 0;
     _opTotal = 0;
@@ -186,11 +190,7 @@ class _BackupPageState extends ConsumerState<BackupPage> {
       _resetProgress();
     });
     try {
-      final r = await op(
-        ref.read(backupServiceProvider),
-        store,
-        _onProgress,
-      );
+      final r = await op(ref.read(backupServiceProvider), store, _onProgress);
       _toast('${r.summary()}（$title完成）');
     } catch (e) {
       _toast('$title失败：$e');
@@ -225,7 +225,12 @@ class _BackupPageState extends ConsumerState<BackupPage> {
       }
       final r = await ref
           .read(backupServiceProvider)
-          .restore(store, manifestName: name, onProgress: _onProgress);
+          .restore(
+            store,
+            manifestName: name,
+            onProgress: _onProgress,
+            opts: _opts,
+          );
       _toast('恢复完成：${r.summary()}');
     } catch (e) {
       _toast('恢复失败：$e');
@@ -553,122 +558,199 @@ class _BackupPageState extends ConsumerState<BackupPage> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    return Scaffold(
-      appBar: AppBar(title: const Text('备份与恢复')),
-      body: ListView(
-        padding: const EdgeInsets.only(bottom: 32),
-        children: [
-          if (_busy) ...[
-            // 进度条：已知总步数时显示确定进度与百分比，否则走动画
-            LinearProgressIndicator(
-              minHeight: 3,
-              value: _opTotal > 0 ? (_opDone / _opTotal).clamp(0.0, 1.0) : null,
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      _opPhase.isNotEmpty ? _opPhase : _busyText,
-                      style: TextStyle(color: cs.primary),
-                    ),
-                  ),
-                  if (_opTotal > 0)
-                    Text(
-                      '${(_opDone / _opTotal * 100).toStringAsFixed(0)}%'
-                      ' · $_opDone/$_opTotal',
-                      style: TextStyle(
-                        color: cs.primary,
-                        fontFeatures: const [FontFeature.tabularFigures()],
+    return PopScope(
+      // 条目9：备份/恢复进行中不可直接退出，防止误触打断操作
+      canPop: !_busy,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop || !_busy) return;
+        final ok = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('退出确认'),
+            content: Text('「$_busyText」正在进行，退出可能会打断操作，导致备份/恢复不完整。确定要退出吗？'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('继续等待'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('退出'),
+              ),
+            ],
+          ),
+        );
+        if (ok == true && mounted) {
+          // 操作本身不中断（后台继续），仅允许离开页面
+          // ignore:use_build_context_synchronously
+          Navigator.of(context).pop();
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(title: const Text('备份与恢复')),
+        body: ListView(
+          padding: const EdgeInsets.only(bottom: 32),
+          children: [
+            if (_busy) ...[
+              // 进度条：已知总步数时显示确定进度与百分比，否则走动画
+              LinearProgressIndicator(
+                minHeight: 3,
+                value: _opTotal > 0
+                    ? (_opDone / _opTotal).clamp(0.0, 1.0)
+                    : null,
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 6,
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        _opPhase.isNotEmpty ? _opPhase : _busyText,
+                        style: TextStyle(color: cs.primary),
                       ),
                     ),
+                    if (_opTotal > 0)
+                      Text(
+                        '${(_opDone / _opTotal * 100).toStringAsFixed(0)}%'
+                        ' · $_opDone/$_opTotal',
+                        style: TextStyle(
+                          color: cs.primary,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+            const _SectionHeader('存储文件夹'),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+              child: TextField(
+                controller: _folderCtrl,
+                decoration: const InputDecoration(
+                  labelText: '文件夹名称',
+                  hintText: 'LiteRead',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                onChanged: (v) => _update((c) => c.copyWith(folderName: v)),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+              child: Text(
+                '备份文件（含设备名与时间）放在此文件夹下，'
+                '书籍文件、进度、封面分别存放在 book/、progress/、covers/ 子文件夹。'
+                '备份目标不存在此文件夹时会自动创建。',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ),
+            const _SectionHeader('备份目标'),
+            for (final t in BackupTargetType.values)
+              ListTile(
+                dense: true,
+                leading: Icon(
+                  _cfg.type == t
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_off,
+                  color: _cfg.type == t
+                      ? Theme.of(context).colorScheme.primary
+                      : null,
+                ),
+                title: Text(t.label),
+                onTap: () {
+                  _update((c) => c.copyWith(type: t));
+                  if (t == BackupTargetType.lan) {
+                    _autoScanIfNeeded();
+                  }
+                },
+              ),
+            ..._buildTargetConfig(),
+            const _SectionHeader('忽略列表'),
+            ..._buildIgnoreList(),
+            const _SectionHeader('操作'),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  FilledButton.icon(
+                    onPressed: _busy
+                        ? null
+                        : () => _runOp(
+                            '备份',
+                            (svc, s, cb) =>
+                                svc.backup(s, onProgress: cb, opts: _opts),
+                          ),
+                    icon: const Icon(Icons.upload_outlined),
+                    label: const Text('立即备份'),
+                  ),
+                  const SizedBox(height: 10),
+                  FilledButton.tonalIcon(
+                    onPressed: _busy
+                        ? null
+                        : () => _runOp(
+                            '同步',
+                            (svc, s, cb) =>
+                                svc.sync(s, onProgress: cb, opts: _opts),
+                          ),
+                    icon: const Icon(Icons.sync_outlined),
+                    label: const Text('同步（自动检索差异）'),
+                  ),
+                  const SizedBox(height: 10),
+                  OutlinedButton.icon(
+                    onPressed: _busy ? null : _onRestore,
+                    icon: const Icon(Icons.restore_outlined),
+                    label: const Text('从备份恢复'),
+                  ),
                 ],
               ),
             ),
           ],
-          const _SectionHeader('存储文件夹'),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
-            child: TextField(
-              controller: _folderCtrl,
-              decoration: const InputDecoration(
-                labelText: '文件夹名称',
-                hintText: 'literead',
-                border: OutlineInputBorder(),
-                isDense: true,
-              ),
-              onChanged: (v) => _update((c) => c.copyWith(folderName: v)),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-            child: Text(
-              '备份文件（含设备名与时间）放在此文件夹下，'
-              '书籍文件、进度、封面分别存放在 book/、progress/、covers/ 子文件夹。',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          ),
-          const _SectionHeader('备份目标'),
-          for (final t in BackupTargetType.values)
-            ListTile(
-              dense: true,
-              leading: Icon(
-                _cfg.type == t
-                    ? Icons.radio_button_checked
-                    : Icons.radio_button_off,
-                color: _cfg.type == t
-                    ? Theme.of(context).colorScheme.primary
-                    : null,
-              ),
-              title: Text(t.label),
-              onTap: () {
-                _update((c) => c.copyWith(type: t));
-                if (t == BackupTargetType.lan) {
-                  _autoScanIfNeeded();
-                }
-              },
-            ),
-          ..._buildTargetConfig(),
-          const _SectionHeader('操作'),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                FilledButton.icon(
-                  onPressed: _busy
-                      ? null
-                      : () => _runOp(
-                          '备份',
-                          (svc, s, cb) => svc.backup(s, onProgress: cb),
-                        ),
-                  icon: const Icon(Icons.upload_outlined),
-                  label: const Text('立即备份'),
-                ),
-                const SizedBox(height: 10),
-                FilledButton.tonalIcon(
-                  onPressed: _busy
-                      ? null
-                      : () => _runOp(
-                          '同步',
-                          (svc, s, cb) => svc.sync(s, onProgress: cb),
-                        ),
-                  icon: const Icon(Icons.sync_outlined),
-                  label: const Text('同步（自动检索差异）'),
-                ),
-                const SizedBox(height: 10),
-                OutlinedButton.icon(
-                  onPressed: _busy ? null : _onRestore,
-                  icon: const Icon(Icons.restore_outlined),
-                  label: const Text('从备份恢复'),
-                ),
-              ],
-            ),
-          ),
-        ],
+        ),
       ),
     );
+  }
+
+  /// 忽略列表：勾选的数据不参与备份与恢复
+  List<Widget> _buildIgnoreList() {
+    return [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
+        child: Text(
+          '勾选的数据不参与备份与恢复（例如换机时不覆盖本机设置）',
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+      ),
+      SwitchListTile(
+        dense: true,
+        title: const Text('主题设置'),
+        value: _cfg.ignoreTheme,
+        onChanged: (v) => _update((c) => c.copyWith(ignoreTheme: v)),
+      ),
+      SwitchListTile(
+        dense: true,
+        title: const Text('阅读界面设置'),
+        value: _cfg.ignoreReader,
+        onChanged: (v) => _update((c) => c.copyWith(ignoreReader: v)),
+      ),
+      SwitchListTile(
+        dense: true,
+        title: const Text('阅读统计'),
+        value: _cfg.ignoreStats,
+        onChanged: (v) => _update((c) => c.copyWith(ignoreStats: v)),
+      ),
+      SwitchListTile(
+        dense: true,
+        title: const Text('本机备份配置'),
+        subtitle: const Text('包含备份目标地址、账号等，恢复时保留本机填写的内容'),
+        value: _cfg.ignoreBackupCfg,
+        onChanged: (v) => _update((c) => c.copyWith(ignoreBackupCfg: v)),
+      ),
+    ];
   }
 
   List<Widget> _buildTargetConfig() {

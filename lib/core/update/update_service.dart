@@ -5,7 +5,7 @@ import 'dart:io';
 import '../storage/app_database.dart';
 
 /// 当前应用版本（X.Y.Z；与 pubspec.yaml 的 version 保持同步）
-const kAppVersion = '1.0.2';
+const kAppVersion = '1.0.3';
 
 /// GitHub 仓库（owner/name）
 const kGitHubRepo = 'XingYuyuop/LiteRead';
@@ -17,12 +17,38 @@ class UpdateInfo {
     required this.changelog,
     required this.releaseUrl,
     required this.publishedAt,
+    this.assets = const {},
   });
 
   final String latestVersion;
   final String changelog;
   final String releaseUrl;
   final DateTime? publishedAt;
+
+  /// 附件下载地址：文件名 → browser_download_url（应用内直接更新用）
+  final Map<String, String> assets;
+
+  /// 按平台挑选合适的安装包附件（null = 没有匹配的附件）
+  String? assetForPlatform() {
+    if (Platform.isAndroid) {
+      // 优先 arm64-v8a，其次 armeabi-v7a
+      for (final pattern in ['arm64-v8a', 'armeabi-v7a']) {
+        for (final e in assets.entries) {
+          if (e.key.endsWith('.apk') && e.key.contains(pattern)) return e.value;
+        }
+      }
+      return null;
+    }
+    if (Platform.isWindows) {
+      for (final e in assets.entries) {
+        if (e.key.contains('windows-x64') && e.key.endsWith('.zip')) {
+          return e.value;
+        }
+      }
+      return null;
+    }
+    return null;
+  }
 
   bool get isNewer {
     final cur = _parseVersion(kAppVersion);
@@ -37,7 +63,11 @@ class UpdateInfo {
   static List<int>? _parseVersion(String v) {
     final m = RegExp(r'(\d+)\.(\d+)\.(\d+)').firstMatch(v.trim());
     if (m == null) return null;
-    return [int.parse(m.group(1)!), int.parse(m.group(2)!), int.parse(m.group(3)!)];
+    return [
+      int.parse(m.group(1)!),
+      int.parse(m.group(2)!),
+      int.parse(m.group(3)!),
+    ];
   }
 }
 
@@ -65,8 +95,10 @@ class UpdateService {
       _db.setSetting(_keyInterval, days.toString());
 
   /// 距上次检查是否已超过 [intervalDays] 天（intervalDays<=0 表示不自动检查）
+  /// intervalDays==1（每次启动）时恒为 true，不受上次检查时间限制
   Future<bool> shouldAutoCheck(int intervalDays) async {
     if (intervalDays <= 0) return false;
+    if (intervalDays == 1) return true;
     final raw = await _db.getSetting(_keyLastCheck);
     final last = int.tryParse(raw?.replaceAll('"', '') ?? '') ?? 0;
     final elapsed = DateTime.now().millisecondsSinceEpoch - last;
@@ -105,6 +137,15 @@ class UpdateService {
       }
       final body = await res.transform(utf8.decoder).join();
       final j = jsonDecode(body) as Map<String, dynamic>;
+      // 附件下载地址（apk/zip），供应用内直接更新
+      final assets = <String, String>{};
+      for (final a in (j['assets'] as List<dynamic>? ?? const [])) {
+        if (a is Map<String, dynamic>) {
+          final name = a['name'] as String?;
+          final url = a['browser_download_url'] as String?;
+          if (name != null && url != null) assets[name] = url;
+        }
+      }
       return UpdateInfo(
         latestVersion: (j['tag_name'] as String? ?? '').replaceFirst('v', ''),
         changelog: j['body'] as String? ?? '',
@@ -112,6 +153,7 @@ class UpdateService {
             j['html_url'] as String? ??
             'https://github.com/$kGitHubRepo/releases/latest',
         publishedAt: DateTime.tryParse(j['published_at'] as String? ?? ''),
+        assets: assets,
       );
     } finally {
       client.close(force: true);
