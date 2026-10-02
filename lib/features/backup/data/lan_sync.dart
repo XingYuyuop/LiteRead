@@ -155,6 +155,20 @@ class LanSyncServer {
         await _json(req, {'ok': true});
         return;
       }
+      if (path == '/api/delete-book' && req.method == 'POST') {
+        // 远端删除确认：删除对端指定书籍（记录 + 文件 + 进度/标注）
+        final bytes = await _readBody(req);
+        final body = jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
+        final id = body['id'] as String?;
+        if (id == null || id.length != 64) {
+          req.response.statusCode = 400;
+          await req.response.close();
+          return;
+        }
+        await _repo.deleteBook(id, deleteManagedFile: true);
+        await _json(req, {'ok': true});
+        return;
+      }
       req.response.statusCode = 404;
       await req.response.close();
     } catch (_) {

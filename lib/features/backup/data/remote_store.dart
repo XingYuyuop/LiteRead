@@ -510,6 +510,9 @@ class LanStore extends RemoteStore {
   final String host;
   final int port;
 
+  /// 单请求超时：连接超时之外再限制整体等待，避免对端失联时同步永久挂起
+  static const _reqTimeout = Duration(seconds: 20);
+
   final HttpClient _client = HttpClient()
     ..connectionTimeout = const Duration(seconds: 10);
 
@@ -528,8 +531,8 @@ class LanStore extends RemoteStore {
     final req = await _client.postUrl(_uri('file', {'path': path}));
     req.headers.contentType = ContentType.binary;
     req.add(bytes);
-    final res = await req.close();
-    await res.drain<void>();
+    final res = await req.close().timeout(_reqTimeout);
+    await res.drain<void>().timeout(_reqTimeout);
     if (res.statusCode >= 300) {
       throw BackupException('局域网上传失败（HTTP ${res.statusCode}）');
     }
@@ -538,7 +541,7 @@ class LanStore extends RemoteStore {
   @override
   Future<List<int>?> getFile(String path) async {
     final req = await _client.getUrl(_uri('file', {'path': path}));
-    final res = await req.close();
+    final res = await req.close().timeout(_reqTimeout);
     if (res.statusCode == 404) return null;
     if (res.statusCode >= 300) {
       await res.drain<void>();
@@ -550,9 +553,9 @@ class LanStore extends RemoteStore {
   @override
   Future<List<String>> listFiles(String path) async {
     final req = await _client.getUrl(_uri('list', {'path': path}));
-    final res = await req.close();
+    final res = await req.close().timeout(_reqTimeout);
     if (res.statusCode >= 300) return const [];
-    final body = await res.transform(utf8.decoder).join();
+    final body = await res.transform(utf8.decoder).join().timeout(_reqTimeout);
     final list = (jsonDecode(body) as List).cast<String>();
     return list;
   }
@@ -564,8 +567,31 @@ class LanStore extends RemoteStore {
   Future<void> registerBook(Map<String, dynamic> entry) async {
     final req = await _client.postUrl(_uri('register'));
     req.add(utf8.encode(jsonEncode(entry)));
-    final res = await req.close();
-    await res.drain<void>();
+    final res = await req.close().timeout(_reqTimeout);
+    await res.drain<void>().timeout(_reqTimeout);
+  }
+
+  /// 删除对端设备上的指定书籍（对端弹确认前由本机用户勾选）
+  Future<void> deleteBook(String id) async {
+    final req = await _client.postUrl(_uri('delete-book'));
+    req.headers.contentType = ContentType.json;
+    req.add(utf8.encode(jsonEncode({'id': id})));
+    final res = await req.close().timeout(_reqTimeout);
+    await res.drain<void>().timeout(_reqTimeout);
+    if (res.statusCode >= 300) {
+      throw BackupException('远端删除失败（HTTP ${res.statusCode}）');
+    }
+  }
+
+  /// 读取对端备份清单（同步确认前对比差异用）
+  Future<Map<String, dynamic>?> fetchManifest() async {
+    final raw = await getFile('manifest.json');
+    if (raw == null) return null;
+    try {
+      return jsonDecode(utf8.decode(raw)) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
   }
 
   /// 探测设备信息（name）
@@ -574,7 +600,7 @@ class LanStore extends RemoteStore {
       final client = HttpClient()
         ..connectionTimeout = const Duration(seconds: 3);
       final req = await client.getUrl(Uri.parse('http://$host:$port/api/ping'));
-      final res = await req.close();
+      final res = await req.close().timeout(const Duration(seconds: 5));
       if (res.statusCode != 200) {
         client.close();
         return null;

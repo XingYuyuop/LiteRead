@@ -174,6 +174,77 @@ void main() {}
     });
   });
 
+  group('日文振假名（EPUB ruby）', () {
+    late LayoutStyleSet styles;
+
+    setUp(() {
+      const cfg = LayoutConfig(
+        fontSize: 18,
+        lineHeight: 1.6,
+        letterSpacing: 0,
+        paragraphSpacing: 0.5,
+        contentWidth: 320,
+        contentHeight: 560,
+        indentChars: 2,
+        justify: true,
+      );
+      styles = LayoutStyleSet(
+        config: cfg,
+        foreground: const ui.Color(0xFF1F2328),
+        secondary: const ui.Color(0xFF6E7781),
+        accent: const ui.Color(0xFF2F6FED),
+      );
+    });
+
+    test('ruby 标签解析：rt 注音挂 InlineRun.ruby 且不计入正文', () async {
+      final result = await const EpubParser().parse(_buildRubyEpub());
+      final doc = result.document;
+      final para = doc.spine.first.blocks
+          .where(
+            (b) =>
+                b.type == BlockType.paragraph &&
+                b.spans.any((s) => s.ruby != null),
+          )
+          .first;
+      final run = para.spans.firstWhere((s) => s.ruby != null);
+      expect(run.text, '漢字');
+      expect(run.ruby, 'かんじ');
+      // 注音不计入 plainText（Locator 坐标不受注音影响）
+      expect(para.plainText, contains('漢字のテスト'));
+      expect(para.plainText, isNot(contains('かんじ')));
+    });
+
+    test('平假名/片假名文本完整保留', () async {
+      final result = await const EpubParser().parse(_buildRubyEpub());
+      final text = result.document.spine.first.blocks
+          .map((b) => b.plainText)
+          .join();
+      expect(text, contains('アイウエオ'));
+      expect(text, contains('あいうえお'));
+      expect(text, contains('のテスト'));
+    });
+
+    test('分页后 rubyRuns 携带块内区间与注音文本', () async {
+      final result = await const EpubParser().parse(_buildRubyEpub());
+      final chapter = result.document.spine.first;
+      final laid = await const TextPaginator().paginate(
+        chapter: chapter,
+        spineIndex: 0,
+        styles: styles,
+      );
+      final withRuby = laid.blocks
+          .where((lb) => lb.rubyRuns.isNotEmpty)
+          .toList();
+      expect(withRuby, isNotEmpty);
+      final (rs, re, rt) = withRuby.first.rubyRuns.first;
+      expect(rt, 'かんじ');
+      expect(rs, lessThan(re));
+      expect(re, lessThanOrEqualTo(withRuby.first.block.plainText.length));
+      // 注音区间正对正文中的被注音文本
+      expect(withRuby.first.block.plainText.substring(rs, re), '漢字');
+    });
+  });
+
   group('格式探测', () {
     test('扩展名 → 格式', () {
       expect(formatFromExtension('a/b.epub'), BookFormat.epub);
@@ -446,6 +517,42 @@ List<int> _buildEpub3WithNav() {
   </nav>
 </body>
 </html>''');
+
+  return ZipEncoder().encode(archive);
+}
+
+/// 构造含 ruby 注音与平假名/片假名的最小 EPUB（振假名回归测试）
+List<int> _buildRubyEpub() {
+  final archive = Archive();
+  void add(String name, String content) => archive.addFile(
+    ArchiveFile(name, utf8.encode(content).length, utf8.encode(content)),
+  );
+
+  add('mimetype', 'application/epub+zip');
+  add('META-INF/container.xml', '''
+<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>''');
+  add('OEBPS/content.opf', '''
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="uid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>振假名测试</dc:title>
+    <dc:language>ja</dc:language>
+  </metadata>
+  <manifest>
+    <item id="c1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="c1"/>
+  </spine>
+</package>''');
+  add(
+    'OEBPS/chapter1.xhtml',
+    '''
+<html><body><p><ruby>漢字<rt>かんじ</rt></ruby>のテスト。カタカナ「アイウエオ」ひらがな「あいうえお」。</p></body></html>''',
+  );
 
   return ZipEncoder().encode(archive);
 }

@@ -56,6 +56,10 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     imageLoadedTick.addListener(_onImageLoaded);
     // 每次打开阅读页清空全局图片缓存：图片 src 为 zip 内相对路径，跨书可能同名
     PageCanvas.clearImageCaches();
+    // 移动端：进入阅读页即隐藏系统状态栏/导航栏（沉浸式全屏），退出时恢复
+    if (Platform.isAndroid || Platform.isIOS) {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    }
     _loadHighlights();
     // 时间/电量每 30 秒刷新一次
     _cornerTimer = Timer.periodic(const Duration(seconds: 30), (_) {
@@ -95,6 +99,10 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     _keyboardFocus.dispose();
     _cornerTimer?.cancel();
     _batterySub?.cancel();
+    // 移动端：离开阅读页恢复系统栏
+    if (Platform.isAndroid || Platform.isIOS) {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    }
     // 离开时保存进度并重置会话
     ref.read(readerControllerProvider.notifier).close();
     super.dispose();
@@ -195,7 +203,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
             if (_menuVisible) _buildMenu(state, settings, spec, isDark),
             // 批注操作条（划词选择中 / 编辑已有批注）
             if (!_menuVisible && (_selecting || _activeHighlight != null))
-              _buildSelectionOverlay(spec),
+              _buildSelectionOverlay(spec, areaSize),
             // 加载/错误
             if (state.loading) const Center(child: CircularProgressIndicator()),
             if (state.error != null)
@@ -382,7 +390,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
           start: h.startChar,
           end: h.endChar,
           colorIndex: h.colorIndex,
-          styleIndex: h.styleIndex,
+          // 标注统一下划线样式（历史背景/波浪也按直线渲染）
+          styleIndex: 1,
         ),
       );
     }
@@ -519,191 +528,113 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     });
   }
 
-  /// 划词/批注操作条（底部悬浮胶囊）
-  Widget _buildSelectionOverlay(ReaderThemeSpec spec) {
+  /// 划词/批注操作条：贴近划线位置悬浮（上方优先，空间不足放下方）。
+  /// 标注统一样式为下划线，划线直接以默认样式保存。
+  Widget _buildSelectionOverlay(ReaderThemeSpec spec, Size areaSize) {
     final active = _activeHighlight;
     final actions = active == null
         ? <(String, IconData, VoidCallback)>[
             (
               '划线',
-              Icons.format_color_fill_outlined,
-              () => _showStyleSheet(spec, onPick: _saveSelectionHighlight),
+              Icons.format_underline_outlined,
+              // 默认色 + 下划线样式，直接保存
+              () => _saveSelectionHighlight(0, 1),
             ),
             ('复制', Icons.copy_outlined, _copySelection),
             ('取消', Icons.close, _clearSelection),
           ]
         : <(String, IconData, VoidCallback)>[
-            (
-              '样式',
-              Icons.format_color_fill_outlined,
-              () => _showStyleSheet(
-                spec,
-                onPick: (c, s) => _updateStyle(active, c, s),
-              ),
-            ),
             ('笔记', Icons.edit_note_outlined, () => _editNote(active)),
             ('删除', Icons.delete_outline, () => _deleteHighlight(active)),
             ('取消', Icons.close, _clearSelection),
           ];
+    final pill = Material(
+      color: spec.background,
+      elevation: 6,
+      borderRadius: BorderRadius.circular(28),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final (label, icon, onTap) in actions)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 2),
+                child: TextButton.icon(
+                  onPressed: onTap,
+                  icon: Icon(icon, size: 18, color: spec.foreground),
+                  label: Text(
+                    label,
+                    style: TextStyle(fontSize: 13, color: spec.foreground),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+
+    // 计算选区/批注在页面上的包围盒，让操作条出现在划线位置附近
+    final s = ref.read(readerControllerProvider);
+    final laid = _laidOf(s);
+    Rect? anchor;
+    if (laid != null && s.pageIndex < laid.pages.length) {
+      final int a;
+      final int b;
+      if (active != null) {
+        a = active.startChar;
+        b = active.endChar;
+      } else {
+        a = _selStart! < _selEnd! ? _selStart! : _selEnd!;
+        b = _selStart! < _selEnd! ? _selEnd! : _selStart!;
+      }
+      anchor = PageCanvas.selectionRect(
+        laid,
+        laid.pages[s.pageIndex],
+        ref.read(readerSettingsProvider).margins,
+        a,
+        b,
+      );
+    }
+    if (anchor == null) {
+      return Positioned(
+        left: 0,
+        right: 0,
+        bottom: 28,
+        child: Center(child: pill),
+      );
+    }
+
+    // 版心收窄时阅读区在页面中的水平偏移
+    final canvasDx = ((MediaQuery.sizeOf(context).width - areaSize.width) / 2)
+        .clamp(0.0, double.infinity);
+    final rect = Rect.fromLTRB(
+      anchor.left + canvasDx,
+      anchor.top,
+      anchor.right + canvasDx,
+      anchor.bottom,
+    );
+    const pillHeight = 52.0;
+    final areaH = areaSize.height;
+    final maxY = (areaH - pillHeight - 8).clamp(8.0, double.infinity);
+    // 选中位置偏下 → 操作条显示在上方；否则显示在下方
+    final showAbove = rect.center.dy > areaH * 0.5;
+    final top = showAbove
+        ? (rect.top - pillHeight - 8).clamp(8.0, maxY)
+        : (rect.bottom + 8).clamp(8.0, maxY);
+    // 水平：操作条中心对齐选区中心（Alignment 自动在屏幕边缘截停）
+    final alignX =
+        ((rect.center.dx / (areaSize.width == 0 ? 1 : areaSize.width)) * 2 - 1)
+            .clamp(-1.0, 1.0);
     return Positioned(
       left: 0,
       right: 0,
-      bottom: 28,
-      child: Center(
-        child: Material(
-          color: spec.background,
-          elevation: 6,
-          borderRadius: BorderRadius.circular(28),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                for (final (label, icon, onTap) in actions)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 2),
-                    child: TextButton.icon(
-                      onPressed: onTap,
-                      icon: Icon(icon, size: 18, color: spec.foreground),
-                      label: Text(
-                        label,
-                        style: TextStyle(fontSize: 13, color: spec.foreground),
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        ),
-      ),
+      top: top,
+      child: Align(alignment: Alignment(alignX, -1), child: pill),
     );
   }
 
-  /// 划线样式选择：5 色 × 3 线型（确定后回调）
-  Future<void> _showStyleSheet(
-    ReaderThemeSpec spec, {
-    required void Function(int colorIndex, int styleIndex) onPick,
-  }) async {
-    var colorIndex = _activeHighlight?.colorIndex ?? 0;
-    var styleIndex = _activeHighlight?.styleIndex ?? 0;
-    await showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSheet) => Container(
-          margin: const EdgeInsets.all(16),
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: spec.background,
-            borderRadius: BorderRadius.circular(16),
-          ),
-          child: SafeArea(
-            top: false,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '颜色',
-                  style: TextStyle(fontSize: 12, color: spec.secondary),
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    for (var i = 0; i < highlightPalette.length; i++)
-                      Expanded(
-                        child: Center(
-                          child: InkWell(
-                            borderRadius: BorderRadius.circular(20),
-                            onTap: () => setSheet(() => colorIndex = i),
-                            child: Container(
-                              width: 34,
-                              height: 34,
-                              decoration: BoxDecoration(
-                                color: highlightPalette[i].withValues(
-                                  alpha: 0.45,
-                                ),
-                                shape: BoxShape.circle,
-                                border: Border.all(
-                                  color: colorIndex == i
-                                      ? spec.accent
-                                      : Colors.transparent,
-                                  width: 2,
-                                ),
-                              ),
-                              child: colorIndex == i
-                                  ? Icon(
-                                      Icons.check,
-                                      size: 18,
-                                      color: spec.foreground,
-                                    )
-                                  : null,
-                            ),
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 14),
-                Text(
-                  '线型',
-                  style: TextStyle(fontSize: 12, color: spec.secondary),
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    for (final (label, value) in [
-                      ('高亮', 0),
-                      ('直线', 1),
-                      ('波浪', 2),
-                    ])
-                      Expanded(
-                        child: Padding(
-                          padding: const EdgeInsets.only(right: 8),
-                          child: ChoiceChip(
-                            label: Center(
-                              child: Text(
-                                label,
-                                style: const TextStyle(fontSize: 12),
-                              ),
-                            ),
-                            selected: styleIndex == value,
-                            showCheckmark: false,
-                            visualDensity: VisualDensity.compact,
-                            onSelected: (_) =>
-                                setSheet(() => styleIndex = value),
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 16),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    TextButton(
-                      onPressed: () => Navigator.pop(ctx),
-                      child: const Text('取消'),
-                    ),
-                    const SizedBox(width: 8),
-                    FilledButton(
-                      onPressed: () {
-                        Navigator.pop(ctx);
-                        onPick(colorIndex, styleIndex);
-                      },
-                      child: const Text('确定'),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// 保存当前划词为批注
+  /// 保存当前划词为批注（统一下划线样式）
   Future<void> _saveSelectionHighlight(int colorIndex, int styleIndex) async {
     final s = ref.read(readerControllerProvider);
     final text = _selectedText;
@@ -726,20 +657,6 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     } catch (_) {
       // 保存失败不阻塞阅读
     }
-    _clearSelection();
-  }
-
-  Future<void> _updateStyle(
-    BookHighlight h,
-    int colorIndex,
-    int styleIndex,
-  ) async {
-    try {
-      await ref
-          .read(highlightRepositoryProvider)
-          .updateStyle(h.id, colorIndex, styleIndex);
-      await _loadHighlights();
-    } catch (_) {}
     _clearSelection();
   }
 

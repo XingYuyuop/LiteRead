@@ -97,6 +97,25 @@ class BackupResult {
   }
 }
 
+/// 局域网同步差异（同步确认数据源）
+class LanDiff {
+  const LanDiff({
+    required this.remoteDeviceName,
+    required this.remoteOnly,
+    required this.localOnly,
+  });
+
+  final String remoteDeviceName;
+
+  /// 远端有、本地没有的书籍清单条目
+  final List<Map<String, dynamic>> remoteOnly;
+
+  /// 本地有、远端没有的书籍
+  final List<Book> localOnly;
+
+  bool get isEmpty => remoteOnly.isEmpty && localOnly.isEmpty;
+}
+
 /// 备份与同步服务
 class BackupService {
   BackupService(this._repo, this._db);
@@ -266,6 +285,81 @@ class BackupService {
 
     // 清理：仅保留每设备最新 3 份清单
     await _pruneManifests(store, keepPerDevice: 3);
+    return r;
+  }
+
+  // ---- 同步确认（局域网设备间） ----
+
+  /// 与远端书籍清单对比（同步确认对话框数据源）
+  Future<LanDiff> diffWithRemote(RemoteStore store) async {
+    final localBooks = await _repo.listBooks();
+    final raw = await store.getFile('manifest.json');
+    if (raw == null) {
+      throw const BackupException('无法读取对端清单（对端可能未开启共享）');
+    }
+    final BackupManifest m;
+    try {
+      m = BackupManifest.fromJson(
+        jsonDecode(utf8.decode(raw)) as Map<String, dynamic>,
+      );
+    } catch (_) {
+      throw const BackupException('对端清单格式异常');
+    }
+    final localIds = localBooks.map((b) => b.id).toSet();
+    final remoteOnly = <Map<String, dynamic>>[];
+    final remoteIds = <String>{};
+    for (final b in m.books) {
+      final id = b['id'] as String?;
+      if (id == null) continue;
+      remoteIds.add(id);
+      if (!localIds.contains(id)) remoteOnly.add(b);
+    }
+    final localOnly = localBooks
+        .where((b) => !remoteIds.contains(b.id))
+        .toList();
+    return LanDiff(
+      remoteDeviceName: m.deviceName,
+      remoteOnly: remoteOnly,
+      localOnly: localOnly,
+    );
+  }
+
+  /// 执行已确认的同步动作（拉取 / 推送 / 删除本机多余 / 删除远端指定）
+  Future<BackupResult> applyLanDiff(
+    RemoteStore store,
+    LanDiff diff, {
+    bool pull = false,
+    bool push = false,
+    List<String> deleteLocalIds = const [],
+    List<String> deleteRemoteIds = const [],
+  }) async {
+    final r = BackupResult();
+    await _ensureDirs(store);
+    if (pull) {
+      for (final e in diff.remoteOnly) {
+        if (await _downloadBook(store, e)) r.booksDownloaded++;
+      }
+    }
+    if (push) {
+      for (final b in diff.localOnly) {
+        await _uploadSingleBook(store, b);
+        r.booksUploaded++;
+      }
+    }
+    // 本机删除指定内容（用户在确认对话框中勾选）
+    if (deleteLocalIds.isNotEmpty) {
+      await _repo.deleteBooks(deleteLocalIds, deleteManagedFile: true);
+    }
+    // 远端删除指定内容（对端 /api/delete-book 端点）
+    if (deleteRemoteIds.isNotEmpty && store is LanStore) {
+      for (final id in deleteRemoteIds) {
+        await store.deleteBook(id);
+      }
+    }
+    // 进度双向合并（新者胜；仅在有内容变动时执行）
+    if (pull || push) {
+      await _mergeProgress(store, r);
+    }
     return r;
   }
 

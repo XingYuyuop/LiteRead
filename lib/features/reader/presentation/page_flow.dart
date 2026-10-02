@@ -147,6 +147,65 @@ class PageCanvas extends StatelessWidget {
     }
     return null;
   }
+
+  /// 章内字符区间 → 当前页局部坐标的包围盒（划词菜单贴近划线位置用）。
+  static Rect? selectionRect(
+    LaidOutChapter laid,
+    PageBox page,
+    EdgeInsets margins,
+    int start,
+    int end,
+  ) {
+    Rect? result;
+    var y = margins.top;
+    for (final unit in page.units) {
+      final lb = laid.blocks[unit.blockIndex];
+      final spaceAbove = identical(unit, page.units.first)
+          ? 0.0
+          : lb.spaceAbove;
+      final visibleH = lb.lineHeights
+          .skip(unit.firstLine)
+          .take(unit.lineCount)
+          .fold(0.0, (a, b) => a + b);
+      y += spaceAbove;
+      final isImageOrHr = lb.isImage || lb.block.type == BlockType.hr;
+      if (!isImageOrHr) {
+        final blockStart = lb.charBase;
+        final blockEnd = lb.charBase + lb.block.plainText.length;
+        if (end > blockStart && start < blockEnd) {
+          final maxOffset = lb.prefixChars + lb.block.plainText.length;
+          final pStart = ((start - blockStart) + lb.prefixChars).clamp(
+            0,
+            maxOffset,
+          );
+          final pEnd = ((end - blockStart) + lb.prefixChars).clamp(
+            0,
+            maxOffset,
+          );
+          if (pStart < pEnd) {
+            final boxes = lb.painter.getBoxesForSelection(
+              TextSelection(baseOffset: pStart, extentOffset: pEnd),
+              boxHeightStyle: ui.BoxHeightStyle.tight,
+            );
+            // painter 原点在页面局部坐标中的位置
+            final originDy = y - lb.lineTops[unit.firstLine];
+            final originDx = margins.left + lb.quoteDepth * 18.0;
+            for (final b in boxes) {
+              final r = Rect.fromLTRB(
+                originDx + b.left,
+                originDy + b.top,
+                originDx + b.right,
+                originDy + b.bottom,
+              );
+              result = result == null ? r : result.expandToInclude(r);
+            }
+          }
+        }
+      }
+      y += visibleH;
+    }
+    return result;
+  }
 }
 
 /// 图片加载完成通知（触发重绘）
@@ -269,6 +328,8 @@ class _PagePainter extends CustomPainter {
       }
       // 第二遍：下划线（样式 1/2）—— 压在文字上方
       _paintRanges(canvas, lb, painterOrigin, ranges, underlinePass: true);
+      // 振假名（ruby 注音）绘制在文字上方
+      _paintRuby(canvas, lb, painterOrigin, unit);
       canvas.restore();
 
       y += visibleH;
@@ -305,6 +366,7 @@ class _PagePainter extends CustomPainter {
   }
 
   /// 绘制一个块内的高亮区间。[underlinePass]=false 画背景填充，true 画下划线。
+  /// 标注统一样式：0=选区背景，1=下划线（历史波浪 2 也按直线渲染）。
   void _paintRanges(
     Canvas canvas,
     LaidOutBlock lb,
@@ -328,8 +390,8 @@ class _PagePainter extends CustomPainter {
         );
         if (styleIndex == 0) {
           canvas.drawRect(r, Paint()..color = color.withValues(alpha: 0.35));
-        } else if (styleIndex == 1) {
-          // 直线下划线
+        } else {
+          // 下划线
           canvas.drawLine(
             Offset(r.left, r.bottom - 1.5),
             Offset(r.right, r.bottom - 1.5),
@@ -338,34 +400,80 @@ class _PagePainter extends CustomPainter {
               ..strokeWidth = 1.5
               ..strokeCap = StrokeCap.round,
           );
-        } else {
-          // 波浪下划线
-          final path = Path();
-          final yWave = r.bottom - 1.5;
-          const amp = 1.5;
-          const wl = 5.0;
-          var x = r.left;
-          var up = true;
-          path.moveTo(x, yWave);
-          while (x < r.right) {
-            final nx = (x + wl).clamp(r.left, r.right).toDouble();
-            path.quadraticBezierTo(
-              (x + nx) / 2,
-              up ? yWave - amp : yWave + amp,
-              nx,
-              yWave,
-            );
-            up = !up;
-            x = nx;
-          }
-          canvas.drawPath(
-            path,
-            Paint()
-              ..color = color
-              ..style = PaintingStyle.stroke
-              ..strokeWidth = 1.2,
-          );
         }
+      }
+    }
+  }
+
+  /// 绘制振假名（ruby 注音）：半号小字绘制在所注音文字的正上方。
+  /// 注音跨行时按行分段绘制；行内上方空间不足时贴行顶绘制。
+  void _paintRuby(
+    Canvas canvas,
+    LaidOutBlock lb,
+    Offset origin,
+    PageUnit unit,
+  ) {
+    if (lb.rubyRuns.isEmpty) return;
+    final cfg = laid.config;
+    final rubyFontSize = cfg.fontSize * 0.5;
+    final blockLen = lb.block.plainText.length;
+    final maxOffset = lb.prefixChars + blockLen;
+    final firstLine = unit.firstLine;
+    final lastLine = unit.firstLine + unit.lineCount - 1;
+
+    for (final (rs, re, rt) in lb.rubyRuns) {
+      for (
+        var ln = firstLine;
+        ln <= lastLine && ln < lb.lineStartChars.length;
+        ln++
+      ) {
+        final ls = lb.lineStartChars[ln];
+        final le = ln + 1 < lb.lineStartChars.length
+            ? lb.lineStartChars[ln + 1]
+            : blockLen;
+        // 注音区间与本行无交集则跳过
+        if (re <= ls || rs >= le) continue;
+        final segStart = rs < ls ? ls : rs;
+        final segEnd = re > le ? le : re;
+        final pStart = (segStart + lb.prefixChars).clamp(0, maxOffset);
+        final pEnd = (segEnd + lb.prefixChars).clamp(0, maxOffset);
+        if (pStart >= pEnd) continue;
+        final boxes = lb.painter.getBoxesForSelection(
+          TextSelection(baseOffset: pStart, extentOffset: pEnd),
+          boxHeightStyle: ui.BoxHeightStyle.tight,
+        );
+        if (boxes.isEmpty) continue;
+        var left = double.infinity;
+        var right = double.negativeInfinity;
+        var glyphTop = double.infinity;
+        for (final b in boxes) {
+          if (b.left < left) left = b.left;
+          if (b.right > right) right = b.right;
+          if (b.top < glyphTop) glyphTop = b.top;
+        }
+        final tp = TextPainter(
+          text: TextSpan(
+            text: rt,
+            style: TextStyle(
+              color: theme.foreground.withValues(alpha: 0.78),
+              fontSize: rubyFontSize,
+              height: 1.05,
+              letterSpacing: 0,
+              fontFamily: cfg.fontFamily,
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+        )..layout();
+        // 水平：居中对齐被注音文字，不超出版心
+        var dx = (left + right) / 2 - tp.width / 2;
+        dx = dx.clamp(
+          0.0,
+          (cfg.contentWidth - tp.width).clamp(0.0, double.infinity),
+        );
+        // 垂直：字形顶上方；空间不足时贴本行行顶
+        final lineTop = lb.lineTops[ln];
+        final dy = (glyphTop - tp.height - 1.0).clamp(lineTop, glyphTop);
+        tp.paint(canvas, Offset(origin.dx + dx, origin.dy + dy));
       }
     }
   }
@@ -510,6 +618,7 @@ class _PageFlowState extends State<PageFlow>
   Widget? _outgoing; // 旧页快照
   int _direction = 0; // 1 下一页（新页从右进），-1 上一页
   double _dragT = 0; // 拖拽进度（0..1，配合方向）
+  double _dragDx = 0; // 手势累计水平位移（含符号，右为正）
   bool _dragging = false;
 
   @override
@@ -555,7 +664,10 @@ class _PageFlowState extends State<PageFlow>
 
   void _onDragStart(DragStartDetails _) {
     if (!widget.enabled || _ctrl.isAnimating) return;
+    // 「无」动画模式：禁用滑动翻页，仅允许点击翻页
+    if (widget.animType == PageTurnType.none) return;
     _dragging = true;
+    _dragDx = 0;
     _dragT = 0;
     _direction = 0;
   }
@@ -564,16 +676,19 @@ class _PageFlowState extends State<PageFlow>
     if (!_dragging || !widget.enabled) return;
     final w = context.size?.width ?? 1;
     if (w <= 0) return;
-    final dx = -d.delta.dx / w; // 向左滑 → 下一页（正）
+    // 累计位移决定进度与方向：进度连续可逆（左右往返不跳变），
+    // 修复旧实现「反向即翻转方向并镜像进度」导致的幅度突跳
+    _dragDx += d.delta.dx;
+    final pos = -_dragDx / w; // 向左滑 → 正（下一页）
     setState(() {
-      if (_direction == 0) {
-        _direction = dx >= 0 ? 1 : -1;
-      }
-      _dragT = (_dragT + dx.abs()).clamp(0.0, 1.0);
-      if (dx.sign != 0 && dx.sign != _direction) {
-        // 反向拖：视为回退
-        _dragT = (1 - _dragT).clamp(0.0, 1.0);
-        _direction = _direction * -1;
+      if (pos > 0) {
+        _direction = 1;
+        _dragT = pos.clamp(0.0, 1.0);
+      } else if (pos < 0) {
+        _direction = -1;
+        _dragT = (-pos).clamp(0.0, 1.0);
+      } else {
+        _dragT = 0;
       }
     });
   }
@@ -700,13 +815,18 @@ class _StackPages extends StatelessWidget {
           ],
         );
       case PageTurnType.cover:
+        // 覆盖翻页：下一页 = 新页从侧边滑入盖在旧页上；
+        // 上一页 = 旧页向侧边滑出、露出下方的新页（与阅读类应用一致）
+        final topPage = dir > 0 ? current : old;
+        final underPage = dir > 0 ? old : current;
+        final topOffset = dir > 0 ? (1 - t) * width : t * width;
         return Stack(
           children: [
-            Positioned.fill(child: RepaintBoundary(child: old)),
+            Positioned.fill(child: RepaintBoundary(child: underPage)),
             Positioned.fill(
               child: Transform.translate(
-                offset: Offset(dir * (1 - t) * width, 0),
-                child: RepaintBoundary(child: current),
+                offset: Offset(topOffset, 0),
+                child: RepaintBoundary(child: topPage),
               ),
             ),
           ],

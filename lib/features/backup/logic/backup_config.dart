@@ -167,10 +167,12 @@ final lanSyncServerProvider = Provider<LanSyncServer>((ref) {
 });
 
 /// 应用启动时恢复局域网共享开关状态（上次开启过则自动开放端口）
+/// 延迟 2 秒执行：避免 socket 绑定与首帧渲染争抢资源，加快启动
 final lanBootstrapProvider = Provider<void>((ref) {
   final server = ref.watch(lanSyncServerProvider);
   final db = ref.watch(appDatabaseProvider);
   unawaited(() async {
+    await Future<void>.delayed(const Duration(seconds: 2));
     try {
       if (await db.getSetting('backup.lanSharing') == 'true') {
         await server.start();

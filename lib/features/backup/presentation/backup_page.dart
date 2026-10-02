@@ -81,6 +81,7 @@ class _BackupPageState extends ConsumerState<BackupPage> {
       _s3RegionCtrl.text = cfg.s3Region;
       _sharing = ref.read(lanSyncServerProvider).running;
     });
+    _autoScanIfNeeded();
   }
 
   void _update(BackupConfig Function(BackupConfig) fn) {
@@ -273,11 +274,235 @@ class _BackupPageState extends ConsumerState<BackupPage> {
       if (found.isEmpty) {
         _toast('未发现局域网设备，请确认对端已开启「共享本机书库」');
       }
+    } catch (e) {
+      _toast('扫描失败：$e');
     } finally {
       if (mounted) {
         setState(() => _scanning = false);
       }
     }
+  }
+
+  /// 进入局域网配置或首次加载时自动扫描一次
+  void _autoScanIfNeeded() {
+    if (_cfg.type == BackupTargetType.lan &&
+        _devices.isEmpty &&
+        !_scanning &&
+        !_busy) {
+      _scanDevices();
+    }
+  }
+
+  /// 点按设备：读取对端清单 → 弹出同步确认对话框 → 执行确认的动作
+  Future<void> _confirmSyncWithDevice(LanDevice d) async {
+    final svc = ref.read(backupServiceProvider);
+    // 记住选中设备（「同步」按钮也可对它使用）
+    _update((c) => c.copyWith(lanAddress: d.address, lanPort: d.port));
+
+    setState(() {
+      _busy = true;
+      _busyText = '连接 ${d.name}…';
+    });
+    LanDiff? diff;
+    LanStore? store;
+    try {
+      store = LanStore(d.address, d.port);
+      diff = await svc.diffWithRemote(store);
+    } catch (e) {
+      await store?.dispose();
+      if (mounted) setState(() => _busy = false);
+      _toast('连接设备失败：$e');
+      return;
+    }
+    if (!mounted) {
+      await store.dispose();
+      return;
+    }
+    setState(() => _busy = false);
+
+    final plan = await _showSyncConfirmDialog(d, diff);
+    if (plan == null || !mounted) {
+      await store.dispose();
+      return;
+    }
+    if (!plan.pull &&
+        !plan.push &&
+        plan.deleteLocalIds.isEmpty &&
+        plan.deleteRemoteIds.isEmpty) {
+      await store.dispose();
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _busyText = '正在与 ${d.name} 同步…';
+    });
+    try {
+      final r = await svc.applyLanDiff(
+        store,
+        diff,
+        pull: plan.pull,
+        push: plan.push,
+        deleteLocalIds: plan.deleteLocalIds.toList(),
+        deleteRemoteIds: plan.deleteRemoteIds.toList(),
+      );
+      _toast('同步完成：${r.summary()}');
+    } catch (e) {
+      _toast('同步失败：$e');
+    } finally {
+      await store.dispose();
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  /// 同步确认对话框：拉取 / 推送 / 删除本机多余 / 删除远端指定
+  Future<_SyncPlan?> _showSyncConfirmDialog(LanDevice d, LanDiff diff) {
+    final plan = _SyncPlan();
+    final cs = Theme.of(context).colorScheme;
+    return showDialog<_SyncPlan>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialog) {
+          final canSubmit =
+              plan.pull ||
+              plan.push ||
+              plan.deleteLocalIds.isNotEmpty ||
+              plan.deleteRemoteIds.isNotEmpty;
+          return AlertDialog(
+            title: Text('与「${diff.remoteDeviceName}」同步'),
+            content: SizedBox(
+              width: 420,
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  CheckboxListTile(
+                    dense: true,
+                    value: plan.pull,
+                    enabled: diff.remoteOnly.isNotEmpty,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(
+                      diff.remoteOnly.isEmpty
+                          ? '对端没有本机缺少的书籍'
+                          : '拉取对端独有书籍（${diff.remoteOnly.length} 本）',
+                      style: TextStyle(
+                        color: diff.remoteOnly.isEmpty ? cs.outline : null,
+                      ),
+                    ),
+                    onChanged: (v) => setDialog(() => plan.pull = v ?? false),
+                  ),
+                  CheckboxListTile(
+                    dense: true,
+                    value: plan.push,
+                    enabled: diff.localOnly.isNotEmpty,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(
+                      diff.localOnly.isEmpty
+                          ? '本机没有对端缺少的书籍'
+                          : '推送本机独有书籍（${diff.localOnly.length} 本）',
+                      style: TextStyle(
+                        color: diff.localOnly.isEmpty ? cs.outline : null,
+                      ),
+                    ),
+                    onChanged: (v) => setDialog(() => plan.push = v ?? false),
+                  ),
+                  if (diff.localOnly.isNotEmpty)
+                    Theme(
+                      data: Theme.of(
+                        ctx,
+                      ).copyWith(dividerColor: Colors.transparent),
+                      child: ExpansionTile(
+                        tilePadding: EdgeInsets.zero,
+                        childrenPadding: const EdgeInsets.only(bottom: 4),
+                        title: Text(
+                          '删除本机多余书籍（已选 ${plan.deleteLocalIds.length}）',
+                          style: const TextStyle(fontSize: 14),
+                        ),
+                        subtitle: const Text(
+                          '谨慎勾选：将同时删除进度与标注',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                        children: [
+                          for (final b in diff.localOnly)
+                            CheckboxListTile(
+                              dense: true,
+                              value: plan.deleteLocalIds.contains(b.id),
+                              controlAffinity: ListTileControlAffinity.leading,
+                              contentPadding: EdgeInsets.zero,
+                              title: Text(
+                                b.title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontSize: 13),
+                              ),
+                              onChanged: (v) => setDialog(() {
+                                v == true
+                                    ? plan.deleteLocalIds.add(b.id)
+                                    : plan.deleteLocalIds.remove(b.id);
+                              }),
+                            ),
+                        ],
+                      ),
+                    ),
+                  if (diff.remoteOnly.isNotEmpty)
+                    Theme(
+                      data: Theme.of(
+                        ctx,
+                      ).copyWith(dividerColor: Colors.transparent),
+                      child: ExpansionTile(
+                        tilePadding: EdgeInsets.zero,
+                        childrenPadding: const EdgeInsets.only(bottom: 4),
+                        title: Text(
+                          '删除对端指定书籍（已选 ${plan.deleteRemoteIds.length}）',
+                          style: const TextStyle(fontSize: 14),
+                        ),
+                        subtitle: Text(
+                          '将在「${diff.remoteDeviceName}」上删除所选书籍',
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                        children: [
+                          for (final b in diff.remoteOnly)
+                            CheckboxListTile(
+                              dense: true,
+                              value: plan.deleteRemoteIds.contains(b['id']),
+                              controlAffinity: ListTileControlAffinity.leading,
+                              contentPadding: EdgeInsets.zero,
+                              title: Text(
+                                '${b['title'] ?? '未命名'}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontSize: 13),
+                              ),
+                              onChanged: (v) => setDialog(() {
+                                final id = b['id'] as String;
+                                v == true
+                                    ? plan.deleteRemoteIds.add(id)
+                                    : plan.deleteRemoteIds.remove(id);
+                              }),
+                            ),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, null),
+                child: const Text('取消'),
+              ),
+              FilledButton.icon(
+                onPressed: canSubmit ? () => Navigator.pop(ctx, plan) : null,
+                icon: const Icon(Icons.sync_outlined, size: 18),
+                label: const Text('开始同步'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
   }
 
   Future<void> _pickLocalDir() async {
@@ -341,7 +566,12 @@ class _BackupPageState extends ConsumerState<BackupPage> {
                     : null,
               ),
               title: Text(t.label),
-              onTap: () => _update((c) => c.copyWith(type: t)),
+              onTap: () {
+                _update((c) => c.copyWith(type: t));
+                if (t == BackupTargetType.lan) {
+                  _autoScanIfNeeded();
+                }
+              },
             ),
           ..._buildTargetConfig(),
           const _SectionHeader('操作'),
@@ -485,18 +715,16 @@ class _BackupPageState extends ConsumerState<BackupPage> {
           dense: true,
           leading: Icon(
             _cfg.lanAddress == d.address && _cfg.lanPort == d.port
-                ? Icons.radio_button_checked
-                : Icons.radio_button_off,
+                ? Icons.computer
+                : Icons.computer_outlined,
             color: _cfg.lanAddress == d.address && _cfg.lanPort == d.port
                 ? Theme.of(context).colorScheme.primary
                 : null,
           ),
           title: Text(d.name),
           subtitle: Text('${d.address}:${d.port}'),
-          trailing: const Icon(Icons.devices_other_outlined),
-          onTap: () => _update(
-            (c) => c.copyWith(lanAddress: d.address, lanPort: d.port),
-          ),
+          trailing: const Icon(Icons.sync_outlined),
+          onTap: _busy ? null : () => _confirmSyncWithDevice(d),
         ),
       if (_cfg.lanAddress.isNotEmpty)
         Padding(
@@ -563,4 +791,12 @@ class _TextField extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 局域网同步计划：用户在确认对话框中勾选的动作
+class _SyncPlan {
+  bool pull = false;
+  bool push = false;
+  final deleteLocalIds = <String>{};
+  final deleteRemoteIds = <String>{};
 }

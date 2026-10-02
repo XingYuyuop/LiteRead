@@ -18,9 +18,7 @@ class HtmlLiteConverter {
     final body = doc.body;
     if (body == null) return const [];
     final ctx = _Ctx();
-    for (final node in body.nodes) {
-      _walkBlock(node, ctx, quoteDepth: 0);
-    }
+    _walkChildren(body.nodes, ctx, quoteDepth: 0);
     return ctx.blocks;
   }
 
@@ -28,9 +26,7 @@ class HtmlLiteConverter {
     final body = doc.body;
     if (body == null) return const [];
     final ctx = _Ctx();
-    for (final node in body.nodes) {
-      _walkBlock(node, ctx, quoteDepth: 0);
-    }
+    _walkChildren(body.nodes, ctx, quoteDepth: 0);
     return ctx.blocks;
   }
 }
@@ -76,21 +72,68 @@ const _blockTags = {
   'center',
 };
 
-void _walkBlock(
-  dom.Node node,
+/// 遍历块级容器的子节点：连续行内内容（文本/ruby/行内标签）缓冲合并为
+/// 同一个段落，遇到块级子元素时先冲刷缓冲再递归处理。
+/// 避免把 `<p><ruby>漢字<rt>…</rt></ruby>のテスト</p>` 拆成多个段落。
+void _walkChildren(
+  List<dom.Node> nodes,
   _Ctx ctx, {
   required int quoteDepth,
   int listDepth = 0,
 }) {
-  if (node is dom.Text) {
-    final text = node.text.replaceAll('\u00a0', ' ').trim();
-    if (text.isNotEmpty) {
-      ctx.blocks.add(_paragraphOf([InlineRun(text)], 0));
-    }
-    return;
-  }
-  if (node is! dom.Element) return;
+  var pending = <InlineRun>[];
 
+  void flush() {
+    final runs = <InlineRun>[];
+    for (var i = 0; i < pending.length; i++) {
+      var t = pending[i].text;
+      if (i == 0) t = t.trimLeft();
+      if (i == pending.length - 1) t = t.trimRight();
+      if (t.isEmpty) continue;
+      final f = pending[i];
+      runs.add(InlineRun(t, flags: f.flags, ruby: f.ruby));
+    }
+    pending = <InlineRun>[];
+    if (runs.any((r) => r.text.trim().isNotEmpty)) {
+      ctx.blocks.add(_paragraphOf(runs, quoteDepth));
+    }
+  }
+
+  for (final child in nodes) {
+    if (child is dom.Text) {
+      final t = child.text.replaceAll('\u00a0', ' ');
+      if (t.isEmpty) continue;
+      // 纯空白节点：夹在行内元素之间时保留一个空格，其余丢弃
+      if (t.trim().isEmpty) {
+        if (pending.isNotEmpty && pending.last.text.isNotEmpty) {
+          pending.add(const InlineRun(' '));
+        }
+        continue;
+      }
+      pending.add(InlineRun(t));
+      continue;
+    }
+    if (child is! dom.Element) continue;
+    final tag = child.localName?.toLowerCase() ?? '';
+    final isBlock =
+        _blockTags.contains(tag) ||
+        const {'img', 'image', 'br', 'svg', 'script', 'style'}.contains(tag);
+    if (isBlock) {
+      flush();
+      _walkBlock(child, ctx, quoteDepth: quoteDepth, listDepth: listDepth);
+    } else {
+      pending.addAll(_inlineRuns(child));
+    }
+  }
+  flush();
+}
+
+void _walkBlock(
+  dom.Element node,
+  _Ctx ctx, {
+  required int quoteDepth,
+  int listDepth = 0,
+}) {
   final tag = node.localName?.toLowerCase() ?? '';
 
   switch (tag) {
@@ -142,9 +185,7 @@ void _walkBlock(
       // 行内换行在块级上下文当作段落边界
       return;
     case 'blockquote':
-      for (final child in node.nodes) {
-        _walkBlock(child, ctx, quoteDepth: quoteDepth + 1);
-      }
+      _walkChildren(node.nodes, ctx, quoteDepth: quoteDepth + 1);
       return;
     case 'ul':
       var i = 0;
@@ -196,9 +237,12 @@ void _walkBlock(
     case 'svg':
       // SVG 容器：不整体忽略，继续走子节点，
       // 内部 <image xlink:href="...">（EPUB 封面页常见）会被提取为图片块
-      for (final child in node.nodes) {
-        _walkBlock(child, ctx, quoteDepth: quoteDepth, listDepth: listDepth);
-      }
+      _walkChildren(
+        node.nodes,
+        ctx,
+        quoteDepth: quoteDepth,
+        listDepth: listDepth,
+      );
       return;
     case 'script':
     case 'style':
@@ -211,16 +255,13 @@ void _walkBlock(
   }
 
   if (_blockTags.contains(tag)) {
-    for (final child in node.nodes) {
-      _walkBlock(child, ctx, quoteDepth: quoteDepth, listDepth: listDepth);
-    }
+    _walkChildren(
+      node.nodes,
+      ctx,
+      quoteDepth: quoteDepth,
+      listDepth: listDepth,
+    );
     return;
-  }
-
-  // 行内标签包裹的直接文本（如 <a><p>…）兜底
-  final text = _inlineText(node);
-  if (text.trim().isNotEmpty) {
-    ctx.blocks.add(_paragraphOf([InlineRun(text)], quoteDepth));
   }
 }
 
@@ -275,9 +316,9 @@ void _walkListItem(
         continue;
       }
     }
-    final run = _walkInline(child);
-    if (run.text.isNotEmpty || child is dom.Element) {
-      inlineRuns.add(run);
+    final runs = _inlineRuns(child);
+    if (runs.any((r) => r.text.isNotEmpty || child is dom.Element)) {
+      inlineRuns.addAll(runs);
       sawInline = true;
     }
   }
@@ -332,22 +373,63 @@ String _inlineText(dom.Node node) {
   return buf.toString();
 }
 
-InlineRun _walkInline(dom.Node node) {
+/// 递归提取行内 runs：保留 ruby 注音（EPUB 振假名），
+/// 其余行内标签样式降级为纯文本。
+List<InlineRun> _inlineRuns(dom.Node node) {
   if (node is dom.Text) {
-    return InlineRun(node.text.replaceAll('\u00a0', ' '));
+    final t = node.text.replaceAll('\u00a0', ' ');
+    return t.isEmpty ? const [] : [InlineRun(t)];
   }
-  if (node is! dom.Element) return const InlineRun('');
+  if (node is! dom.Element) return const [];
   final tag = node.localName ?? '';
-  if (tag == 'br') return const InlineRun(' ');
+  if (tag == 'br') return const [InlineRun(' ')];
   if (tag == 'img' || tag == 'image') {
     final src =
         node.attributes['src'] ??
         node.attributes['xlink:href'] ??
         node.attributes['href'];
-    return InlineRun(src != null ? '［图］' : '');
+    return [InlineRun(src != null ? '［图］' : '')];
   }
-  // 嵌套行内标签，取全部文本（样式降级）
-  return InlineRun(_inlineText(node));
+  if (tag == 'ruby') {
+    // <ruby>漢<rt>かん</rt></ruby>：base 文本 + rt 注音
+    final base = StringBuffer();
+    var rt = '';
+    for (final c in node.nodes) {
+      if (c is dom.Element) {
+        final t = c.localName ?? '';
+        if (t == 'rt') {
+          rt += c.text;
+          continue;
+        }
+        if (t == 'rp') continue; // 括号提示符丢弃
+        if (t == 'rb') {
+          base.write(c.text);
+          continue;
+        }
+        // 嵌套行内（em/span 等）：递归取文本与注音
+        final inner = _inlineRuns(c);
+        for (final r in inner) {
+          base.write(r.text);
+          if (r.ruby != null) rt += r.ruby!;
+        }
+        continue;
+      }
+      if (c is dom.Text) {
+        base.write(c.text);
+      }
+    }
+    final baseText = base.toString().replaceAll('\u00a0', ' ');
+    final rtText = rt.replaceAll('\u00a0', ' ').trim();
+    if (baseText.isEmpty) return const [];
+    if (rtText.isEmpty) return [InlineRun(baseText)];
+    return [InlineRun(baseText, ruby: rtText)];
+  }
+  // 普通行内标签：递归展开子节点并合并
+  final out = <InlineRun>[];
+  for (final c in node.nodes) {
+    out.addAll(_inlineRuns(c));
+  }
+  return out;
 }
 
 /// 解析相对路径，剥离锚点

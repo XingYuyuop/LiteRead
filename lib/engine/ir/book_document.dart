@@ -9,10 +9,14 @@ enum InlineFlag { bold, italic, link }
 
 /// 行内片段：一段带样式的纯文本
 class InlineRun {
-  const InlineRun(this.text, {this.flags = const {}});
+  const InlineRun(this.text, {this.flags = const {}, this.ruby});
 
   final String text;
   final Set<InlineFlag> flags;
+
+  /// 振假名注音（EPUB `<ruby>漢<rt>かん</rt></ruby>` 的 rt 内容）。
+  /// 注音不计入 [text]（不影响 Locator 坐标），渲染时绘制在文字上方。
+  final String? ruby;
 
   bool get hasBold => flags.contains(InlineFlag.bold);
   bool get hasItalic => flags.contains(InlineFlag.italic);

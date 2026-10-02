@@ -63,6 +63,7 @@ class LaidOutBlock {
     required this.isImage,
     this.charBase = 0,
     this.prefixChars = 0,
+    this.rubyRuns = const [],
   });
 
   final int blockIndex;
@@ -92,6 +93,9 @@ class LaidOutBlock {
 
   /// 文本前缀字符数（缩进全角空格/列表标号），批注坐标 ↔ TextPainter 偏移换算
   final int prefixChars;
+
+  /// 振假名注音区间：(块内纯文本起点, 终点, 注音文本)，渲染时绘制在文字上方
+  final List<(int, int, String)> rubyRuns;
 
   /// 图片显示高度（仅图片块）
   final double imageHeight = 0;
@@ -319,9 +323,10 @@ class TextPaginator {
         break;
     }
 
-    // 文本前缀：首行缩进（中文全角空格）与列表标号。
+    // 文本前缀：首行缩进（透明 CJK 字形）与列表标号。
     // 前缀不计入 Locator 坐标，行首字符映射时统一剔除。
     var prefix = '';
+    var prefixTransparent = false;
     var indentWidth = 0.0;
     var fontSize = cfg.fontSize;
     var fontWeight = FontWeight.normal;
@@ -370,7 +375,12 @@ class TextPaginator {
     }
 
     if (block.type == BlockType.paragraph && cfg.indentChars > 0) {
-      prefix = '\u3000' * cfg.indentChars;
+      // 缩进前缀用透明 CJK 字形而非全角空格（U+3000）：
+      // U+3000 属空白字符，两端对齐时会被对齐算法拉伸，
+      // 导致缩进宽度随每行剩余空间变化（缩进忽大忽小）；
+      // 透明字形不参与空白拉伸，宽度恒为 1em，对齐/左对齐缩进一致。
+      prefix = '\u4E00' * cfg.indentChars;
+      prefixTransparent = true;
       indentWidth = cfg.indentChars * fontSize;
     }
 
@@ -400,7 +410,8 @@ class TextPaginator {
         TextSpan(
           text: prefix,
           style: TextStyle(
-            color: color,
+            // 透明缩进前缀：占位但不参与两端对齐的空白拉伸
+            color: prefixTransparent ? const ui.Color(0x00000000) : color,
             fontSize: fontSize,
             fontWeight: fontWeight,
             height: height,
@@ -409,6 +420,18 @@ class TextPaginator {
           ),
         ),
       );
+    }
+
+    // 振假名注音区间（块内纯文本坐标，渲染层绘制在文字上方）
+    final rubyRuns = <(int, int, String)>[];
+    var runOffset = 0;
+    for (final run in block.spans) {
+      final len = run.text.length;
+      final rb = run.ruby;
+      if (rb != null && rb.isNotEmpty && len > 0) {
+        rubyRuns.add((runOffset, runOffset + len, rb));
+      }
+      runOffset += len;
     }
 
     final tp = TextPainter(
@@ -464,6 +487,7 @@ class TextPaginator {
       isImage: false,
       charBase: charBase,
       prefixChars: prefix.length,
+      rubyRuns: rubyRuns,
     );
   }
 

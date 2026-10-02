@@ -235,17 +235,17 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
                           child: prefs.grid
                               ? GridView.builder(
                                   padding: const EdgeInsets.fromLTRB(
-                                    20,
-                                    8,
-                                    20,
+                                    12,
+                                    6,
+                                    12,
                                     96,
                                   ),
                                   gridDelegate:
                                       const SliverGridDelegateWithMaxCrossAxisExtent(
-                                        maxCrossAxisExtent: 140,
-                                        mainAxisSpacing: 24,
-                                        crossAxisSpacing: 20,
-                                        childAspectRatio: 0.58,
+                                        maxCrossAxisExtent: 104,
+                                        mainAxisSpacing: 14,
+                                        crossAxisSpacing: 12,
+                                        childAspectRatio: 0.60,
                                       ),
                                   itemCount: books.length,
                                   itemBuilder: (context, i) => _BookCard(
@@ -816,15 +816,15 @@ class _BookCard extends StatelessWidget {
                 Positioned.fill(
                   child: Container(
                     decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(10),
+                      borderRadius: BorderRadius.circular(7),
                       border: selectionMode && selected
-                          ? Border.all(color: cs.primary, width: 2.5)
+                          ? Border.all(color: cs.primary, width: 2)
                           : null,
                       boxShadow: [
                         BoxShadow(
-                          color: cs.shadow.withValues(alpha: 0.18),
-                          blurRadius: 10,
-                          offset: const Offset(0, 4),
+                          color: cs.shadow.withValues(alpha: 0.15),
+                          blurRadius: 6,
+                          offset: const Offset(0, 3),
                         ),
                       ],
                     ),
@@ -833,8 +833,8 @@ class _BookCard extends StatelessWidget {
                 ),
                 if (selectionMode)
                   Positioned(
-                    top: 4,
-                    right: 4,
+                    top: 3,
+                    right: 3,
                     child: _SelectionBadge(
                       selected: selected,
                       color: cs.primary,
@@ -843,13 +843,15 @@ class _BookCard extends StatelessWidget {
               ],
             ),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 5),
           Text(
             book.title,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.bodySmall,
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(fontSize: 11, height: 1.2),
           ),
         ],
       ),
