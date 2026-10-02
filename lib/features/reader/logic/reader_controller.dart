@@ -84,6 +84,11 @@ class ReaderController extends Notifier<ReaderState> {
   ReaderThemeSpec? _activeSpec;
   Timer? _saveDebounce;
 
+  /// 阅读会话代号：open/close 时递增。
+  /// 所有跨 await 的状态写入前必须校验会话未变，防止换书竞态
+  /// （慢解析的旧书异步回调覆盖新书的 state）。
+  int _session = 0;
+
   @override
   ReaderState build() {
     ref.listen(readerSettingsProvider, (prev, next) {
@@ -104,16 +109,32 @@ class ReaderController extends Notifier<ReaderState> {
 
   Future<void> open(String bookId, {Size? viewport}) async {
     if (viewport != null) _viewport = viewport;
+    final session = ++_session;
+
+    // 换书前把上一本书的进度落盘（快照先取，避免状态被重置后丢失）
+    final prevBook = state.book;
+    final prevLocator = currentLocator;
+    final prevPercent = state.percent;
+    if (prevBook != null && prevLocator != null) {
+      try {
+        await _repo.saveProgress(prevBook.id, prevLocator, prevPercent);
+      } catch (_) {}
+    }
+    if (session != _session) return;
+
     _lru.clear();
-    state = ReaderState(loading: true);
+    _imageAspects.clear();
+    state = const ReaderState(loading: true);
 
     try {
       final book = await _repo.getBook(bookId);
+      if (session != _session) return;
       if (book == null) {
         state = state.copyWith(loading: false, error: '书籍不存在（可能已被删除）');
         return;
       }
       final output = await const BookParser().parseFile(book.filePath);
+      if (session != _session) return;
       state = state.copyWith(
         book: book,
         document: output.document,
@@ -122,6 +143,7 @@ class ReaderController extends Notifier<ReaderState> {
       );
       // 恢复进度
       final saved = await _repo.getProgress(bookId);
+      if (session != _session) return;
       if (saved != null && saved.spineIndex < output.document.spine.length) {
         await _gotoChapter(
           saved.spineIndex,
@@ -131,18 +153,29 @@ class ReaderController extends Notifier<ReaderState> {
         await _gotoChapter(0);
       }
     } on BookParseException catch (e) {
+      if (session != _session) return;
       state = state.copyWith(loading: false, error: e.message);
     } catch (e) {
+      if (session != _session) return;
       state = state.copyWith(loading: false, error: '打开失败：$e');
     }
   }
 
-  /// 关闭阅读器（回书架前保存进度）
+  /// 关闭阅读器（回书架前保存进度）。
+  /// 先同步清空状态再异步落盘：保证下一本书打开时绝看不到上一本的内容。
   Future<void> close() async {
-    await _saveProgressNow();
+    _session++;
+    final book = state.book;
+    final locator = currentLocator;
+    final percent = state.percent;
     _saveDebounce?.cancel();
     _lru.clear();
     state = const ReaderState();
+    if (book != null && locator != null) {
+      try {
+        await _repo.saveProgress(book.id, locator, percent);
+      } catch (_) {}
+    }
   }
 
   // ---- 视口 ----
@@ -181,8 +214,9 @@ class ReaderController extends Notifier<ReaderState> {
   Future<void> _gotoChapter(int index, {int charOffset = 0}) async {
     final doc = state.document;
     if (doc == null || index < 0 || index >= doc.spine.length) return;
+    final session = _session;
     final laid = await _getLaidChapter(index);
-    if (laid == null) return;
+    if (session != _session || laid == null) return;
     final page = laid.pageIndexForChar(charOffset);
     state = state.copyWith(
       spineIndex: index,
@@ -389,7 +423,8 @@ class ReaderController extends Notifier<ReaderState> {
         prev.marginRight != next.marginRight ||
         prev.indentChars != next.indentChars ||
         prev.justify != next.justify ||
-        prev.fontFamily != next.fontFamily;
+        prev.fontFamily != next.fontFamily ||
+        prev.contentWidthScale != next.contentWidthScale;
     if (!affectsLayout) return;
     final offset = currentCharOffset ?? 0;
     _lru.clear();

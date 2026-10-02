@@ -121,8 +121,18 @@ void main() {}
       );
       expect(doc.toc.first.title, '第一章 标题');
 
-      // 资源惰性加载
-      final img = await doc.resources.get('images/cover.png');
+      // 章内插图：src 相对章节目录 → 解析为 zip 内绝对路径（插图不显示回归）
+      final imageBlock = doc.spine[0].blocks
+          .where((b) => b.type == BlockType.image)
+          .toList();
+      expect(imageBlock, isNotEmpty);
+      expect(imageBlock.first.imageSrc, 'OEBPS/images/pic.png');
+      final pic = await doc.resources.get(imageBlock.first.imageSrc!);
+      expect(pic, isNotNull);
+      expect(pic, hasLength(4));
+
+      // 资源惰性加载（zip 绝对路径）
+      final img = await doc.resources.get('OEBPS/images/cover.png');
       expect(img, isNotNull);
       expect(img, hasLength(4));
     });
@@ -326,7 +336,7 @@ List<int> _buildMinimalEpub() {
   </spine>
 </package>''');
   add('OEBPS/chapter1.xhtml', '''
-<html><body><h1>第一章 标题</h1><p>这是第一章内容。</p></body></html>''');
+<html><body><h1>第一章 标题</h1><img src="images/pic.png"/><p>这是第一章内容。</p></body></html>''');
   add('OEBPS/chapter2.xhtml', '''
 <html><body><p>第二章内容继续。</p></body></html>''');
   add('OEBPS/toc.ncx', '''
@@ -346,6 +356,9 @@ List<int> _buildMinimalEpub() {
   // 假 PNG（4 字节头即可通过长度断言）
   archive.addFile(
     ArchiveFile('OEBPS/images/cover.png', 4, [0x89, 0x50, 0x4E, 0x47]),
+  );
+  archive.addFile(
+    ArchiveFile('OEBPS/images/pic.png', 4, [0x89, 0x50, 0x4E, 0x47]),
   );
 
   return ZipEncoder().encode(archive);

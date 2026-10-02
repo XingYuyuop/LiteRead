@@ -37,6 +37,13 @@ class PageCanvas extends StatelessWidget {
       size: Size.infinite,
     );
   }
+
+  /// 图片缓存按 src 全局共享；src 是 zip 内相对路径，跨书可能同名冲突，
+  /// 打开新书时必须清空。
+  static void clearImageCaches() {
+    _PagePainter.imageCache.clear();
+    _PagePainter.imageLoading.clear();
+  }
 }
 
 /// 图片加载完成通知（触发重绘）
@@ -57,8 +64,8 @@ class _PagePainter extends CustomPainter {
   final EdgeInsets margins;
   final ResourceStore? resources;
 
-  static final _imageCache = <String, ui.Image>{};
-  static final _loading = <String>{};
+  static final imageCache = <String, ui.Image>{};
+  static final imageLoading = <String>{};
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -160,7 +167,7 @@ class _PagePainter extends CustomPainter {
   ) {
     final src = block.block.imageSrc;
     final rect = Rect.fromLTWH(x, y, w, h);
-    final img = src != null ? _imageCache[src] : null;
+    final img = src != null ? imageCache[src] : null;
     if (img != null) {
       final srcRect = Rect.fromLTWH(
         0,
@@ -198,8 +205,8 @@ class _PagePainter extends CustomPainter {
       canvas,
       Offset(rect.center.dx - tp.width / 2, rect.center.dy - tp.height / 2),
     );
-    if (src != null && resources != null && !_loading.contains(src)) {
-      _loading.add(src);
+    if (src != null && resources != null && !imageLoading.contains(src)) {
+      imageLoading.add(src);
       _loadImage(src);
     }
   }
@@ -213,12 +220,12 @@ class _PagePainter extends CustomPainter {
         targetWidth: 1024,
       );
       final frame = await codec.getNextFrame();
-      _imageCache[src] = frame.image;
+      imageCache[src] = frame.image;
       imageLoadedTick.value++;
     } catch (_) {
       // 图片解码失败保持占位
     } finally {
-      _loading.remove(src);
+      imageLoading.remove(src);
     }
   }
 
@@ -382,30 +389,33 @@ class _PageFlowState extends State<PageFlow>
       onHorizontalDragEnd: _onDragEnd,
       child: AnimatedBuilder(
         animation: _ctrl,
-        builder: (context, _) {
-          final width = MediaQuery.sizeOf(context).width;
-          final hasOutgoing = _outgoing != null;
-          final t = _dragging ? _dragT : (hasOutgoing ? _ctrl.value : 0.0);
-          final dir = _direction;
-          if (!hasOutgoing && t == 0) {
-            return widget.buildPage();
-          }
-          if (!hasOutgoing && _dragging) {
-            // 拖拽反馈：当前页跟手平移（peek），邻页未排版时无对接页
-            return Transform.translate(
-              offset: Offset(-dir * t * width * 0.25, 0),
-              child: widget.buildPage(),
+        builder: (context, _) => LayoutBuilder(
+          builder: (context, bc) {
+            // 用实际阅读区宽度（版心收窄后 ≠ 窗口宽度）
+            final width = bc.maxWidth;
+            final hasOutgoing = _outgoing != null;
+            final t = _dragging ? _dragT : (hasOutgoing ? _ctrl.value : 0.0);
+            final dir = _direction;
+            if (!hasOutgoing && t == 0) {
+              return widget.buildPage();
+            }
+            if (!hasOutgoing && _dragging) {
+              // 拖拽反馈：当前页跟手平移（peek），邻页未排版时无对接页
+              return Transform.translate(
+                offset: Offset(-dir * t * width * 0.25, 0),
+                child: widget.buildPage(),
+              );
+            }
+            return _StackPages(
+              current: widget.buildPage(),
+              outgoing: _outgoing,
+              t: t,
+              dir: dir,
+              type: widget.animType,
+              width: width,
             );
-          }
-          return _StackPages(
-            current: widget.buildPage(),
-            outgoing: _outgoing,
-            t: t,
-            dir: dir,
-            type: widget.animType,
-            width: width,
-          );
-        },
+          },
+        ),
       ),
     );
   }

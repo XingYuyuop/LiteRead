@@ -20,6 +20,7 @@ class ReaderSettings {
     this.indentChars = 2,
     this.justify = true,
     this.fontFamily,
+    this.contentWidthScale = 1.0,
     this.pageAnim = 'cover',
     this.showStatusBar = true,
     this.keepScreenOn = true,
@@ -36,6 +37,10 @@ class ReaderSettings {
   final int indentChars; // 0–4
   final bool justify;
   final String? fontFamily; // null = 系统默认
+
+  /// 版心宽度比例（0.5–1.0）：阅读区占窗口宽度的比例，桌面端可收窄成书页
+  final double contentWidthScale;
+
   final String pageAnim; // none|cover|slide|fade
   final bool showStatusBar;
   final bool keepScreenOn;
@@ -56,6 +61,7 @@ class ReaderSettings {
     bool? justify,
     String? fontFamily,
     bool clearFont = false,
+    double? contentWidthScale,
     String? pageAnim,
     bool? showStatusBar,
     bool? keepScreenOn,
@@ -72,6 +78,7 @@ class ReaderSettings {
       indentChars: indentChars ?? this.indentChars,
       justify: justify ?? this.justify,
       fontFamily: clearFont ? null : (fontFamily ?? this.fontFamily),
+      contentWidthScale: contentWidthScale ?? this.contentWidthScale,
       pageAnim: pageAnim ?? this.pageAnim,
       showStatusBar: showStatusBar ?? this.showStatusBar,
       keepScreenOn: keepScreenOn ?? this.keepScreenOn,
@@ -90,6 +97,7 @@ class ReaderSettings {
     'indentChars': indentChars,
     'justify': justify,
     'fontFamily': fontFamily,
+    'contentWidthScale': contentWidthScale,
     'pageAnim': pageAnim,
     'showStatusBar': showStatusBar,
     'keepScreenOn': keepScreenOn,
@@ -107,6 +115,7 @@ class ReaderSettings {
     indentChars: j['indentChars'] as int? ?? 2,
     justify: j['justify'] as bool? ?? true,
     fontFamily: j['fontFamily'] as String?,
+    contentWidthScale: (j['contentWidthScale'] as num?)?.toDouble() ?? 1.0,
     pageAnim: j['pageAnim'] as String? ?? 'cover',
     showStatusBar: j['showStatusBar'] as bool? ?? true,
     keepScreenOn: j['keepScreenOn'] as bool? ?? true,

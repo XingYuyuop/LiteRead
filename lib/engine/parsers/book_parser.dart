@@ -5,6 +5,7 @@ import 'epub_parser.dart' show BookParseException, EpubParser;
 export 'epub_parser.dart' show BookParseException;
 import 'md_parser.dart';
 import 'mobi_parser.dart';
+import 'pdf_parser.dart';
 import 'txt_parser.dart';
 import '../ir/book_document.dart';
 
@@ -118,7 +119,13 @@ class BookParser {
           coverBytes: r.coverBytes,
         );
       case BookFormat.pdf:
-        throw const BookParseException('PDF 阅读将在 v0.3 提供（M2）');
+        final r = await const PdfParser().parse(path);
+        return ParseOutput(
+          document: r.document,
+          format: format,
+          coverBytes: r.coverBytes,
+          pageCount: r.pageCount,
+        );
     }
   }
 }
@@ -129,12 +136,16 @@ class ParseOutput {
     required this.format,
     this.coverBytes,
     this.txtEncoding,
+    this.pageCount,
   });
 
   final BookDocument document;
   final BookFormat format;
   final List<int>? coverBytes;
   final TxtEncoding? txtEncoding;
+
+  /// PDF 专属：总页数（其他格式为 null）
+  final int? pageCount;
 }
 
 String utf8Safe(List<int> bytes) {

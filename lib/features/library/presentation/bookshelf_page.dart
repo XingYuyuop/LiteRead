@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -58,6 +59,20 @@ final bookshelfPrefsProvider =
       BookshelfPrefsController.new,
     );
 
+/// 支持拖入/选择的书籍扩展名
+const _supportedExtensions = [
+  'epub',
+  'pdf',
+  'mobi',
+  'azw3',
+  'prc',
+  'azw',
+  'kf8',
+  'md',
+  'markdown',
+  'txt',
+];
+
 /// 书架页（计划书 FR-A01/02/04/06）
 class BookshelfPage extends ConsumerStatefulWidget {
   const BookshelfPage({super.key});
@@ -69,6 +84,7 @@ class BookshelfPage extends ConsumerStatefulWidget {
 class _BookshelfPageState extends ConsumerState<BookshelfPage> {
   String _keyword = '';
   bool _importing = false;
+  bool _dragging = false;
 
   @override
   Widget build(BuildContext context) {
@@ -83,7 +99,10 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
     return Scaffold(
       backgroundColor: colorScheme.surface,
       appBar: AppBar(
-        title: const Text('轻阅'),
+        title: const Text(
+          '轻阅',
+          style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: 2),
+        ),
         backgroundColor: Colors.transparent,
         actions: [
           IconButton(
@@ -120,47 +139,76 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
           ),
         ],
       ),
-      body: StreamBuilder<List<Book>>(
-        stream: repo.watchBooks(sort: prefs.sort),
-        builder: (context, snap) {
-          var books = snap.data ?? const <Book>[];
-          if (_keyword.isNotEmpty) {
-            final k = _keyword.toLowerCase();
-            books = books
-                .where(
-                  (b) =>
-                      b.title.toLowerCase().contains(k) ||
-                      (b.author ?? '').toLowerCase().contains(k),
-                )
-                .toList();
+      body: DropTarget(
+        // 桌面端拖拽导入（FR-A03）
+        onDragEntered: (_) => setState(() => _dragging = true),
+        onDragExited: (_) => setState(() => _dragging = false),
+        onDragDone: (details) {
+          setState(() => _dragging = false);
+          final paths = details.files
+              .map((f) => f.path)
+              .where(
+                (p) => _supportedExtensions.contains(
+                  p.toLowerCase().split('.').last,
+                ),
+              )
+              .toList();
+          if (paths.isEmpty) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('暂不支持该文件格式')),
+            );
+            return;
           }
-          if (books.isEmpty) {
-            return _EmptyState(importing: _importing);
-          }
-          return RefreshIndicator(
-            onRefresh: () async {},
-            child: prefs.grid
-                ? GridView.builder(
-                    padding: const EdgeInsets.all(16),
-                    gridDelegate:
-                        const SliverGridDelegateWithMaxCrossAxisExtent(
-                          maxCrossAxisExtent: 120,
-                          mainAxisSpacing: 20,
-                          crossAxisSpacing: 16,
-                          childAspectRatio: 0.62,
-                        ),
-                    itemCount: books.length,
-                    itemBuilder: (context, i) =>
-                        _BookCard(book: books[i], spec: spec),
-                  )
-                : ListView.builder(
-                    padding: const EdgeInsets.symmetric(vertical: 8),
-                    itemCount: books.length,
-                    itemBuilder: (context, i) =>
-                        _BookTile(book: books[i], spec: spec),
-                  ),
-          );
+          _importPaths(paths);
         },
+        child: Stack(
+          children: [
+            StreamBuilder<List<Book>>(
+              stream: repo.watchBooks(sort: prefs.sort),
+              builder: (context, snap) {
+                var books = snap.data ?? const <Book>[];
+                if (_keyword.isNotEmpty) {
+                  final k = _keyword.toLowerCase();
+                  books = books
+                      .where(
+                        (b) =>
+                            b.title.toLowerCase().contains(k) ||
+                            (b.author ?? '').toLowerCase().contains(k),
+                      )
+                      .toList();
+                }
+                if (books.isEmpty) {
+                  return _EmptyState(importing: _importing);
+                }
+                return RefreshIndicator(
+                  onRefresh: () async {},
+                  child: prefs.grid
+                      ? GridView.builder(
+                          padding: const EdgeInsets.fromLTRB(20, 8, 20, 96),
+                          gridDelegate:
+                              const SliverGridDelegateWithMaxCrossAxisExtent(
+                                maxCrossAxisExtent: 140,
+                                mainAxisSpacing: 24,
+                                crossAxisSpacing: 20,
+                                childAspectRatio: 0.58,
+                              ),
+                          itemCount: books.length,
+                          itemBuilder: (context, i) =>
+                              _BookCard(book: books[i], spec: spec),
+                        )
+                      : ListView.builder(
+                          padding: const EdgeInsets.fromLTRB(8, 4, 8, 96),
+                          itemCount: books.length,
+                          itemBuilder: (context, i) =>
+                              _BookTile(book: books[i], spec: spec),
+                        ),
+                );
+              },
+            ),
+            // 拖拽悬停提示层
+            if (_dragging) _DropOverlay(spec: spec),
+          ],
+        ),
       ),
       floatingActionButton: FloatingActionButton.extended(
         heroTag: 'import',
@@ -178,34 +226,28 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
   }
 
   Future<void> _importBooks() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: _supportedExtensions,
+      allowMultiple: true,
+      withData: false,
+    );
+    if (result == null || result.files.isEmpty) return;
+    await _importPaths(result.files.map((f) => f.path!).toList());
+  }
+
+  Future<void> _importPaths(List<String> paths) async {
+    if (paths.isEmpty || _importing) return;
     setState(() => _importing = true);
     try {
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: [
-          'epub',
-          'md',
-          'markdown',
-          'txt',
-          'pdf',
-          'mobi',
-          'azw3',
-          'prc',
-          'azw',
-        ],
-        allowMultiple: true,
-        withData: false,
-      );
-      if (result == null || result.files.isEmpty) return;
       final repo = ref.read(bookRepositoryProvider);
       var imported = 0;
       var failed = 0;
       var duplicated = 0;
       String? lastError;
-      for (final f in result.files) {
-        if (f.path == null) continue;
+      for (final path in paths) {
         try {
-          final outcome = await repo.importFile(f.path!);
+          final outcome = await repo.importFile(path);
           if (outcome.duplicated) {
             duplicated++;
           } else {
@@ -261,6 +303,51 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
   }
 }
 
+/// 拖拽悬停提示层
+class _DropOverlay extends StatelessWidget {
+  const _DropOverlay({required this.spec});
+
+  final ReaderThemeSpec spec;
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned.fill(
+      child: Container(
+        color: spec.background.withValues(alpha: 0.85),
+        padding: const EdgeInsets.all(20),
+        child: Container(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: spec.accent, width: 2),
+            color: spec.accent.withValues(alpha: 0.06),
+          ),
+          alignment: Alignment.center,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.library_add, size: 48, color: spec.accent),
+              const SizedBox(height: 12),
+              Text(
+                '松开导入书籍',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: spec.foreground,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                '支持 EPUB / PDF / MOBI / AZW3 / Markdown / TXT',
+                style: TextStyle(fontSize: 12, color: spec.secondary),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _EmptyState extends StatelessWidget {
   const _EmptyState({required this.importing});
 
@@ -273,19 +360,27 @@ class _EmptyState extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(
-            Icons.auto_stories,
-            size: 72,
-            color: cs.primary.withValues(alpha: 0.5),
+          Container(
+            width: 112,
+            height: 112,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: cs.primary.withValues(alpha: 0.08),
+            ),
+            child: Icon(
+              Icons.auto_stories,
+              size: 56,
+              color: cs.primary.withValues(alpha: 0.6),
+            ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 20),
           Text(
             importing ? '正在导入…' : '书架空空如也',
             style: Theme.of(context).textTheme.titleMedium,
           ),
           const SizedBox(height: 8),
           Text(
-            '支持 EPUB / MOBI / AZW3 / Markdown / TXT\n点击右下角导入，或将文件拖入窗口',
+            '支持 EPUB / PDF / MOBI / AZW3 / Markdown / TXT\n点击右下角导入，或将文件拖入窗口',
             textAlign: TextAlign.center,
             style: Theme.of(
               context,
@@ -309,7 +404,7 @@ class CoverView extends StatelessWidget {
     final coverPath = book.coverPath;
     if (coverPath != null && File(coverPath).existsSync()) {
       return ClipRRect(
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(10),
         child: Image.file(
           File(coverPath),
           fit: BoxFit.cover,
@@ -334,7 +429,7 @@ class CoverView extends StatelessWidget {
     final ch = book.title.isEmpty ? '书' : book.title.characters.first;
     return Container(
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(10),
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
@@ -379,6 +474,7 @@ class _BookCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final cs = Theme.of(context).colorScheme;
     return GestureDetector(
       onTap: () => context.push('/reader/${book.id}'),
       onLongPress: () => showBookActions(context, ref, book),
@@ -386,13 +482,26 @@ class _BookCard extends ConsumerWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Expanded(
-            child: CoverView(book: book, spec: spec),
+            child: Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(10),
+                boxShadow: [
+                  BoxShadow(
+                    color: cs.shadow.withValues(alpha: 0.18),
+                    blurRadius: 10,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: CoverView(book: book, spec: spec),
+            ),
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 8),
           Text(
             book.title,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.bodySmall,
           ),
         ],
@@ -410,23 +519,30 @@ class _BookTile extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final cs = Theme.of(context).colorScheme;
-    return ListTile(
-      leading: SizedBox(
-        width: 44,
-        height: 60,
-        child: CoverView(book: book, spec: spec),
+    return Card(
+      elevation: 0,
+      color: cs.surfaceContainerHighest.withValues(alpha: 0.4),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      child: ListTile(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        leading: SizedBox(
+          width: 44,
+          height: 60,
+          child: CoverView(book: book, spec: spec),
+        ),
+        title: Text(book.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+        subtitle: Text(
+          '${book.author ?? '佚名'} · ${book.format}',
+          maxLines: 1,
+          style: TextStyle(color: cs.outline, fontSize: 12),
+        ),
+        trailing: IconButton(
+          icon: const Icon(Icons.more_vert),
+          onPressed: () => showBookActions(context, ref, book),
+        ),
+        onTap: () => context.push('/reader/${book.id}'),
       ),
-      title: Text(book.title, maxLines: 1, overflow: TextOverflow.ellipsis),
-      subtitle: Text(
-        '${book.author ?? '佚名'} · ${book.format}',
-        maxLines: 1,
-        style: TextStyle(color: cs.outline, fontSize: 12),
-      ),
-      trailing: IconButton(
-        icon: const Icon(Icons.more_vert),
-        onPressed: () => showBookActions(context, ref, book),
-      ),
-      onTap: () => context.push('/reader/${book.id}'),
     );
   }
 }
@@ -501,6 +617,7 @@ Future<void> showBookDetails(
 
   final chapters = meta['chapterCount'];
   final chars = meta['charCount'];
+  final pages = meta['pageCount'];
   final added = DateTime.fromMillisecondsSinceEpoch(book.addedAt);
 
   showDialog<void>(
@@ -514,8 +631,11 @@ Future<void> showBookDetails(
           row('作者', book.author ?? '佚名'),
           row('格式', book.format),
           if (book.fileSize != null) row('大小', formatBytes(book.fileSize!)),
-          if (chapters != null) row('章节', '$chapters 章'),
-          if (chars != null) row('字数', '$chars 字'),
+          if (pages != null)
+            row('页数', '$pages 页')
+          else if (chapters != null)
+            row('章节', '$chapters 章'),
+          if (chars != null && (chars as int) > 0) row('字数', '$chars 字'),
           row(
             '进度',
             percent == null ? '未开始' : '${(percent * 100).toStringAsFixed(1)}%',

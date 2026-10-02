@@ -56,12 +56,7 @@ class BookRepository {
       fileSize: Value(bytes.length),
       coverPath: Value(coverPath),
       addedAt: DateTime.now().millisecondsSinceEpoch,
-      metaJson: Value(
-        jsonEncode({
-          'chapterCount': doc.spine.length,
-          'charCount': doc.totalChars,
-        }),
-      ),
+      metaJson: Value(jsonEncode(_buildMeta(doc, output))),
     );
     await _db.into(_db.books).insertOnConflictUpdate(companion);
 
@@ -70,6 +65,12 @@ class BookRepository {
     )..where((t) => t.id.equals(id))).getSingle();
     return ImportOutcome(book: row, duplicated: false);
   }
+
+  Map<String, dynamic> _buildMeta(BookDocument doc, ParseOutput output) => {
+    'chapterCount': doc.spine.length,
+    'charCount': doc.totalChars,
+    if (output.pageCount != null) 'pageCount': output.pageCount,
+  };
 
   Future<Uint8List?> _extractCover(
     BookDocument doc,

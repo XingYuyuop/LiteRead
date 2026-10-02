@@ -194,7 +194,12 @@ void _walkBlock(
       }
       return;
     case 'svg':
-      return; // 复杂矢量降级为忽略
+      // SVG 容器：不整体忽略，继续走子节点，
+      // 内部 <image xlink:href="...">（EPUB 封面页常见）会被提取为图片块
+      for (final child in node.nodes) {
+        _walkBlock(child, ctx, quoteDepth: quoteDepth, listDepth: listDepth);
+      }
+      return;
     case 'script':
     case 'style':
     case 'head':

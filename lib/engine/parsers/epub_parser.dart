@@ -136,16 +136,23 @@ class EpubParser {
 
     final converter = const HtmlLiteConverter();
 
-    List<int>? resourceOf(String href) {
-      final key = _norm(_join(opfDir, href));
-      final f = entries[key];
+    /// zip 内绝对路径 → 资源字节（章节插图等）
+    List<int>? entryBytes(String path) {
+      final key = _norm(path);
+      final f = entries[key] ?? entries[_decodeZipPath(key)];
       return f == null ? null : f.content as List<int>;
+    }
+
+    /// manifest href（相对 OPF 目录）→ 资源字节
+    List<int>? manifestResource(String href) {
+      final key = _norm(_join(opfDir, href));
+      return entryBytes(key);
     }
 
     // 5. 逐章解析
     final chapters = <Chapter>[];
     for (final href in spineHrefs) {
-      final data = resourceOf(href);
+      final data = manifestResource(href);
       if (data == null) {
         chapters.add(Chapter(id: href, title: '（缺失：$href）', blocks: const []));
         continue;
@@ -153,6 +160,19 @@ class EpubParser {
       final html = _decodeText(data);
       final doc = html_parser.parse(html);
       final blocks = converter.convertDocument(doc);
+      // 关键修复：图片 src 相对「章节文件目录」而非 OPF 目录，
+      // 统一解析为 zip 内绝对路径，否则插图资源全部 404。
+      // 注意 spine href 是 OPF 相对路径，需先合并 OPF 目录得到章节的 zip 路径。
+      final chapterDir = _dirOf(_norm(_join(opfDir, href)));
+      for (var i = 0; i < blocks.length; i++) {
+        final b = blocks[i];
+        final src = b.imageSrc;
+        if (b.type == BlockType.image && src != null && src.isNotEmpty) {
+          blocks[i] = b.copyWith(
+            imageSrc: _join(chapterDir, Uri.decodeComponent(src)),
+          );
+        }
+      }
       final chapterTitle = _firstHeading(doc) ?? _fileNameTitle(href);
       chapters.add(Chapter(id: href, title: chapterTitle, blocks: blocks));
     }
@@ -160,13 +180,13 @@ class EpubParser {
     // 6. 目录：EPUB3 nav → NCX → 兜底（每章一项目录）
     final toc = <TocEntry>[];
     if (navHref != null) {
-      final navData = resourceOf(navHref);
+      final navData = manifestResource(navHref);
       if (navData != null) {
         toc.addAll(_parseNav(_decodeText(navData), spineHrefs));
       }
     }
     if (toc.isEmpty && ncxHref != null) {
-      final ncxData = resourceOf(ncxHref);
+      final ncxData = manifestResource(ncxHref);
       if (ncxData != null) {
         toc.addAll(_parseNcx(_decodeText(ncxData), spineHrefs));
       }
@@ -177,14 +197,14 @@ class EpubParser {
       }
     }
 
-    // 7. 资源存储（惰性）
-    final resources = ResourceStore((id) async => resourceOf(id));
+    // 7. 资源存储（惰性；imageSrc 已是 zip 内绝对路径）
+    final resources = ResourceStore((id) async => entryBytes(id));
 
     // 8. 封面
     List<int>? coverBytes;
     String? coverResource;
     if (coverHref != null) {
-      coverBytes = resourceOf(coverHref);
+      coverBytes = manifestResource(coverHref);
       coverResource = coverHref;
     }
 
@@ -314,6 +334,15 @@ class BookParseException implements Exception {
 
 String _norm(String path) =>
     path.replaceAll('\\', '/').replaceFirst(RegExp(r'^/'), '');
+
+/// zip 条目名可能保留 URL 编码形式（如 `my%20image.png`），兜底解码查找
+String _decodeZipPath(String path) {
+  try {
+    return Uri.decodeComponent(path);
+  } catch (_) {
+    return path;
+  }
+}
 
 String _dirOf(String path) {
   final i = path.lastIndexOf('/');
