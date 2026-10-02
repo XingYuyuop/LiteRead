@@ -9,7 +9,24 @@ void showAppSnackBar(
   Duration? duration,
   SnackBarAction? action,
 }) {
-  ScaffoldMessenger.of(context)
+  showAppSnackBarOn(
+    ScaffoldMessenger.of(context),
+    message,
+    duration: duration,
+    action: action,
+  );
+}
+
+/// 基于 [ScaffoldMessengerState] 的提示条变体：
+/// 供异步流程在 BuildContext 可能已失效时使用（messenger 为应用级单例，
+/// 不随页面销毁失效）
+void showAppSnackBarOn(
+  ScaffoldMessengerState messenger,
+  String message, {
+  Duration? duration,
+  SnackBarAction? action,
+}) {
+  messenger
     ..hideCurrentSnackBar()
     ..showSnackBar(
       SnackBar(
@@ -22,12 +39,9 @@ void showAppSnackBar(
           children: [
             Text(message),
             const SizedBox(height: 2),
-            Text(
+            const Text(
               '← 左右滑动可关闭 →',
-              style: TextStyle(
-                fontSize: 11,
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
+              style: TextStyle(fontSize: 11, color: Colors.white70),
             ),
           ],
         ),

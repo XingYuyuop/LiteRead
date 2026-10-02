@@ -282,9 +282,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
                         ..sort();
                   var books = all;
                   if (_filterGroup != null) {
-                    books = books
-                        .where((b) => b.groupName == _filterGroup)
-                        .toList();
+                    books = books.where(_matchGroup).toList();
                   }
                   if (_keyword.isNotEmpty) {
                     final k = _keyword.toLowerCase();
@@ -522,6 +520,15 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
     );
   }
 
+  /// 分组过滤：_filterGroup 为 null = 全部；'' = 未分组（groupName 为 null 或空）；
+  /// 其他 = 指定分组名。计数与列表过滤统一走这里，避免「未分组 x 个但列表为空」
+  bool _matchGroup(Book b) {
+    final g = _filterGroup;
+    if (g == null) return true;
+    if (g.isEmpty) return b.groupName == null || b.groupName!.isEmpty;
+    return b.groupName == g;
+  }
+
   void _onBookTap(Book book, {required bool selectionMode}) {
     if (selectionMode) {
       setState(() {
@@ -556,7 +563,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
     ref.read(bookRepositoryProvider).listBooks(sort: prefs.sort).then((all) {
       var filtered = all;
       if (_filterGroup != null) {
-        filtered = filtered.where((b) => b.groupName == _filterGroup).toList();
+        filtered = filtered.where(_matchGroup).toList();
       }
       if (_keyword.isNotEmpty) {
         final k = _keyword.toLowerCase();

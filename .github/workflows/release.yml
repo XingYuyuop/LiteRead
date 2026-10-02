@@ -164,51 +164,33 @@ jobs:
         run: |
           cp dist/android-out/* dist/release/
           cd dist/release && find . -type f -exec sha256sum {} \; > SHA256SUMS.txt
-      - name: 构建 Release 说明（含更新日志）
+      - name: 构建 Release 说明（仅编号式更新日志）
         run: |
           {
-            echo "## 轻阅 LiteRead ${{ needs.meta.outputs.version }}"
-            echo ""
-            if [[ "${{ needs.meta.outputs.channel }}" == "beta" ]]; then
-              echo "> ⚠️ **测试版（beta）**：功能可能不稳定，仅供尝鲜与反馈。"
-              echo ""
-            fi
-            # 更新日志：上个 tag 到当前提交的提交摘要（跳过版本号 chore 提交）
-            echo "### 更新日志"
+            # 更新日志：上个 tag 到当前提交的提交摘要，以「1. 2. …」编号列出；
+            # 跳过 chore 提交（版本号 bump），去掉 type 前缀（如 feat:）
             PREV=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null \
               || git describe --tags --abbrev=0 HEAD 2>/dev/null || true)
             if [ -n "$PREV" ]; then
-              git log --pretty=format:'- %s' "$PREV..HEAD" \
-                | grep -v -- '- chore' >> release-log.tmp || true
+              git log --pretty=format:'%s' "$PREV..HEAD" \
+                | grep -v '^chore' \
+                | sed 's/^[a-zA-Z][a-zA-Z]*\(([^)]*)\)\{0,1\}: *//; s/^v[0-9][0-9.]*—— *//' \
+                | awk '{printf "%d. %s\n", NR, $0}'
             else
-              git log --pretty=format:'- %s' -8 >> release-log.tmp || true
+              git log --pretty=format:'%s' -8 \
+                | grep -v '^chore' \
+                | sed 's/^[a-zA-Z][a-zA-Z]*\(([^)]*)\)\{0,1\}: *//; s/^v[0-9][0-9.]*—— *//' \
+                | awk '{printf "%d. %s\n", NR, $0}'
             fi
-            if [ -s release-log.tmp ]; then
-              cat release-log.tmp
-            else
-              echo "- 详见提交历史"
-            fi
-            rm -f release-log.tmp
-            echo ""
-            echo ""
-            echo "### 下载指引"
-            echo "- **Android**：\`LiteRead-<版本>-arm64-v8a.apk\`（绝大多数现代手机）/ \`armeabi-v7a.apk\`（老设备）"
-            echo "- **Windows**：\`LiteRead-<版本>-windows-x64.zip\`，解压后直接运行 \`literead.exe\`（免安装便携版）"
-            echo "- 完整性校验见 \`SHA256SUMS.txt\`"
-            echo ""
-            echo "> Windows SmartScreen 可能对未签名程序弹窗，点击「仍要运行」即可（计划书 R4）。"
-            echo ""
-            echo "### 注意事项"
-            echo "- v1.0.3 起改用固定签名密钥。若此前安装的是 **v1.0.2 及更早版本**（临时签名），"
-            echo "  覆盖安装会提示「签名不一致」，请先卸载旧版再安装本版本（数据可在新版本内通过「备份与恢复」迁移）。"
           } > release-body.md
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.meta.outputs.version }}
+          name: v${{ needs.meta.outputs.version }}
           files: dist/release/**
           prerelease: ${{ needs.meta.outputs.prerelease }}
           body_path: release-body.md
-          generate_release_notes: true
+          generate_release_notes: false
 
   # 发布成功通知（t15）：Release 成功发出后标记任务完成。
   # - 写入 Workflow Summary（Actions 页可见）

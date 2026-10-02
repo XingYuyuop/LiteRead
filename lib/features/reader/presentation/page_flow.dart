@@ -627,10 +627,10 @@ PageTurnType pageTurnTypeOf(String s) => switch (s) {
 };
 
 /// 覆盖动画的视差幅度（底层页位移比例）与压暗峰值
-const _coverParallax = 0.2;
+const _coverParallax = 0.25;
 const _coverDim = 0.35;
 
-/// 页面流：三区点按 + 拖拽 + 三种翻页动画（无/覆盖/平移，200ms easeOutCubic）。
+/// 页面流：三区点按 + 拖拽 + 三种翻页动画（无/覆盖/平移，300ms easeOutCubic）。
 /// 动画统一带缓动曲线；拖拽跟手为线性，松手后从当前进度无缝切入缓动动画。
 class PageFlow extends StatefulWidget {
   const PageFlow({
@@ -639,7 +639,7 @@ class PageFlow extends StatefulWidget {
     required this.onNext,
     required this.onPrev,
     required this.animType,
-    this.duration = const Duration(milliseconds: 200),
+    this.duration = const Duration(milliseconds: 300),
     this.onTapCenter,
     this.enabled = true,
     this.onLongPressStart,

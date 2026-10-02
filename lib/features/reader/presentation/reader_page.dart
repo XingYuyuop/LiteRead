@@ -378,7 +378,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
       animType: pageTurnTypeOf(settings.inkMode ? 'none' : settings.pageAnim),
       duration: settings.inkMode
           ? Duration.zero
-          : const Duration(milliseconds: 180),
+          : const Duration(milliseconds: 300),
       buildPage: () {
         final s = ref.read(readerControllerProvider);
         final chapterLaid = _laidOf(s);
@@ -916,8 +916,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     }
 
     return Positioned.fill(
+      // 无暗化遮罩：菜单贴合阅读界面背景（中间空白区点按关闭菜单）
       child: Material(
-        color: Colors.black45,
+        color: Colors.transparent,
         child: Column(
           children: [
             // 顶栏：返回书架 + 书名（设置已并入底部选项栏，无右上角按钮）
@@ -1139,6 +1140,14 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
       mainAxisSize: MainAxisSize.min,
       children: [
         _sectionLabel('翻页动画', spec.secondary),
+        if (settings.inkMode)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Text(
+              '已开启墨水屏模式：翻页动画已禁用，关闭后可恢复',
+              style: TextStyle(fontSize: 12, color: spec.secondary),
+            ),
+          ),
         Row(
           children: [
             for (final (label, value) in [

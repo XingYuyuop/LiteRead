@@ -26,11 +26,18 @@ Future<bool> runInAppUpdate(BuildContext context, UpdateInfo info) async {
   final phase = ValueNotifier<String>('连接服务器…');
   // 预先取根导航器：关闭进度对话框时不跨越 async 使用 BuildContext
   final rootNavigator = Navigator.of(context, rootNavigator: true);
+  // 进度对话框自身的 context：关闭前始终有效。
+  // 调用方（「发现新版本」对话框）在启动更新前已被 pop，其 context 会失效，
+  // 因此安装阶段一律使用 dialogCtx，避免下载完成后静默返回（不跳安装界面）
+  BuildContext? dialogCtx;
+  // 应用级 messenger：异步流程中的提示不依赖任何 BuildContext 的存活
+  final messenger = ScaffoldMessenger.of(context);
 
   final dialogFuture = showDialog<void>(
     context: context,
     barrierDismissible: false,
-    builder: (_) {
+    builder: (ctx) {
+      dialogCtx = ctx;
       return PopScope(
         canPop: false,
         child: AlertDialog(
@@ -76,21 +83,23 @@ Future<bool> runInAppUpdate(BuildContext context, UpdateInfo info) async {
     error = e;
   }
 
-  rootNavigator.pop();
-  await dialogFuture;
-  if (!context.mounted) return true;
+  // 安装阶段的 UI 全部挂在进度对话框的 ctx 上（此时对话框尚未关闭）
+  // ignore: use_build_context_synchronously
+  final uiCtx = dialogCtx;
 
   if (error != null) {
-    showAppSnackBar(context, '更新失败：$error');
+    rootNavigator.pop();
+    await dialogFuture;
+    showAppSnackBarOn(messenger, '更新失败：$error');
     return true;
   }
 
   try {
     if (Platform.isAndroid) {
-      await _installApkAndroid(context, file!.path);
+      await _installApkAndroid(uiCtx ?? context, file!.path);
     } else if (Platform.isWindows) {
       final restart = await showDialog<bool>(
-        context: context,
+        context: uiCtx ?? context,
         builder: (ctx) => AlertDialog(
           title: const Text('更新包已下载'),
           content: const Text('应用将自动退出并完成更新，随后会重新启动。是否继续？'),
@@ -106,9 +115,9 @@ Future<bool> runInAppUpdate(BuildContext context, UpdateInfo info) async {
           ],
         ),
       );
-      if (restart == true && context.mounted) {
-        showAppSnackBar(
-          context,
+      if (restart == true) {
+        showAppSnackBarOn(
+          messenger,
           '应用即将退出，替换完成后会自动重新启动…',
           duration: const Duration(seconds: 5),
         );
@@ -118,8 +127,10 @@ Future<bool> runInAppUpdate(BuildContext context, UpdateInfo info) async {
       }
     }
   } catch (e) {
-    if (context.mounted) showAppSnackBar(context, '安装失败：$e');
+    showAppSnackBarOn(messenger, '安装失败：$e');
   }
+  rootNavigator.pop();
+  await dialogFuture;
   return true;
 }
 

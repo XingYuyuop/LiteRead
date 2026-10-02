@@ -10,7 +10,7 @@ import 'update_service.dart';
 Future<void> showUpdateFoundDialog(BuildContext context, UpdateInfo info) {
   return showDialog<void>(
     context: context,
-    builder: (context) => AlertDialog(
+    builder: (dialogCtx) => AlertDialog(
       title: Text('发现新版本 v${info.latestVersion}'),
       content: SizedBox(
         width: 420,
@@ -48,12 +48,14 @@ Future<void> showUpdateFoundDialog(BuildContext context, UpdateInfo info) {
       ),
       actions: [
         TextButton(
-          onPressed: () => Navigator.pop(context),
+          onPressed: () => Navigator.pop(dialogCtx),
           child: const Text('稍后再说'),
         ),
         FilledButton.icon(
           onPressed: () async {
-            Navigator.pop(context);
+            // 关闭本对话框后，用页面 context（长活）启动更新流程；
+            // 更新内部的后续 UI 由进度对话框自身的 context 承载
+            Navigator.pop(dialogCtx);
             // 应用内直接更新（下载 → 安装/替换）；无匹配附件时回退浏览器
             final started = await runInAppUpdate(context, info);
             if (!started && context.mounted) {
