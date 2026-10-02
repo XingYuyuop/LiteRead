@@ -455,7 +455,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
         action(icon: Icons.select_all, label: '全选', onTap: _toggleSelectAll),
         action(
           icon: Icons.drive_file_move_outline,
-          label: '移动分组',
+          label: '分组',
           onTap: count == 0 ? null : _batchMoveToGroup,
         ),
         action(
@@ -468,7 +468,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
         if (count == 1)
           action(
             icon: Icons.info_outline,
-            label: '查看书籍信息',
+            label: '信息',
             onTap: () {
               final id = _selectedIds.single;
               ref.read(bookRepositoryProvider).getBook(id).then((b) {

@@ -148,6 +148,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions: { contents: write }
     steps:
+      # 完整历史（含 tags）：用于生成「上个版本以来」的更新日志
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
       - uses: actions/download-artifact@v4
         with: { path: dist }
       - name: 打包 Windows 便携 zip（扁平结构：解压直接呈现应用文件）
@@ -161,7 +164,7 @@ jobs:
         run: |
           cp dist/android-out/* dist/release/
           cd dist/release && find . -type f -exec sha256sum {} \; > SHA256SUMS.txt
-      - name: 构建 Release 说明
+      - name: 构建 Release 说明（含更新日志）
         run: |
           {
             echo "## 轻阅 LiteRead ${{ needs.meta.outputs.version }}"
@@ -170,6 +173,24 @@ jobs:
               echo "> ⚠️ **测试版（beta）**：功能可能不稳定，仅供尝鲜与反馈。"
               echo ""
             fi
+            # 更新日志：上个 tag 到当前提交的提交摘要（跳过版本号 chore 提交）
+            echo "### 更新日志"
+            PREV=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null \
+              || git describe --tags --abbrev=0 HEAD 2>/dev/null || true)
+            if [ -n "$PREV" ]; then
+              git log --pretty=format:'- %s' "$PREV..HEAD" \
+                | grep -v -- '- chore' >> release-log.tmp || true
+            else
+              git log --pretty=format:'- %s' -8 >> release-log.tmp || true
+            fi
+            if [ -s release-log.tmp ]; then
+              cat release-log.tmp
+            else
+              echo "- 详见提交历史"
+            fi
+            rm -f release-log.tmp
+            echo ""
+            echo ""
             echo "### 下载指引"
             echo "- **Android**：\`LiteRead-<版本>-arm64-v8a.apk\`（绝大多数现代手机）/ \`armeabi-v7a.apk\`（老设备）"
             echo "- **Windows**：\`LiteRead-<版本>-windows-x64.zip\`，解压后直接运行 \`literead.exe\`（免安装便携版）"

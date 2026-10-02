@@ -5,7 +5,7 @@ import 'dart:io';
 import '../storage/app_database.dart';
 
 /// 当前应用版本（X.Y.Z；与 pubspec.yaml 的 version 保持同步）
-const kAppVersion = '1.0.5';
+const kAppVersion = '1.0.6';
 
 /// GitHub 仓库（owner/name）
 const kGitHubRepo = 'XingYuyuop/LiteRead';

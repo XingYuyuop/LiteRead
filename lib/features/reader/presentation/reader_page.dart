@@ -1046,7 +1046,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     ),
   );
 
-  /// 进度调整：常驻显示；拖动即时跳转；左右按钮切换上一章/下一章
+  /// 进度调整：常驻显示；拖动即时跳转；左右按钮切换上一章/下一章，
+  /// 跳转后菜单保持打开（进度随章节变化自动刷新）
   Widget _buildProgressRow(ReaderState state, ReaderThemeSpec spec) {
     return Row(
       children: [
@@ -1054,12 +1055,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
           tooltip: '上一章',
           icon: Icon(Icons.skip_previous, color: spec.accent, size: 22),
           onPressed: state.spineIndex > 0
-              ? () async {
-                  await ref
-                      .read(readerControllerProvider.notifier)
-                      .jumpToChapter(state.spineIndex - 1);
-                  if (mounted) _closeMenu();
-                }
+              ? () => ref
+                    .read(readerControllerProvider.notifier)
+                    .jumpToChapter(state.spineIndex - 1)
               : null,
         ),
         Expanded(
@@ -1083,12 +1081,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
           tooltip: '下一章',
           icon: Icon(Icons.skip_next, color: spec.accent, size: 22),
           onPressed: state.spineIndex + 1 < (state.document?.spine.length ?? 0)
-              ? () async {
-                  await ref
-                      .read(readerControllerProvider.notifier)
-                      .jumpToChapter(state.spineIndex + 1);
-                  if (mounted) _closeMenu();
-                }
+              ? () => ref
+                    .read(readerControllerProvider.notifier)
+                    .jumpToChapter(state.spineIndex + 1)
               : null,
         ),
       ],

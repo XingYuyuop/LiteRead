@@ -630,7 +630,8 @@ PageTurnType pageTurnTypeOf(String s) => switch (s) {
 const _coverParallax = 0.2;
 const _coverDim = 0.35;
 
-/// 页面流：三区点按 + 拖拽 + 三种翻页动画（无/覆盖/平移，180ms ease-out）。
+/// 页面流：三区点按 + 拖拽 + 三种翻页动画（无/覆盖/平移，200ms easeOutCubic）。
+/// 动画统一带缓动曲线；拖拽跟手为线性，松手后从当前进度无缝切入缓动动画。
 class PageFlow extends StatefulWidget {
   const PageFlow({
     super.key,
@@ -638,7 +639,7 @@ class PageFlow extends StatefulWidget {
     required this.onNext,
     required this.onPrev,
     required this.animType,
-    this.duration = const Duration(milliseconds: 180),
+    this.duration = const Duration(milliseconds: 200),
     this.onTapCenter,
     this.enabled = true,
     this.onLongPressStart,
@@ -681,6 +682,10 @@ class _PageFlowState extends State<PageFlow>
   double _dragT = 0; // 拖拽进度（0..1，配合方向）
   double _dragDx = 0; // 手势累计水平位移（含符号，右为正）
   bool _dragging = false;
+  // 松手动画的起始进度：显示进度 = _fromT + (1-_fromT) * easeOutCubic(ctrl)，
+  // 保证从拖拽进度无缝衔接（起始帧显示值恰为拖拽进度）；回弹时反向使用
+  double _fromT = 0;
+  bool _snapBack = false; // 回弹动画中（进度从 _fromT 收回 0）
 
   @override
   void dispose() {
@@ -701,6 +706,7 @@ class _PageFlowState extends State<PageFlow>
     setState(() {
       _outgoing = old;
       _direction = dir;
+      _fromT = 0;
     });
     await _ctrl.forward(from: 0);
     if (mounted) {
@@ -793,23 +799,35 @@ class _PageFlowState extends State<PageFlow>
     }
 
     if (shouldTurn) {
-      // 从当前拖拽进度继续动画到 1
+      // 从当前拖拽进度继续动画到 1（无缝：起始显示值恰为拖拽进度）
       if (_outgoing == null) {
         final old = widget.buildPage();
         final ok = await (_direction == 1 ? widget.onNext() : widget.onPrev());
         if (ok && mounted) {
           setState(() {
             _outgoing = old;
+            _fromT = t;
           });
-          _ctrl.value = t;
-          await _ctrl.forward();
+          await _ctrl.forward(from: 0);
           if (mounted) setState(() => _outgoing = null);
           return;
         }
       }
       await _turn(_direction == 1 ? widget.onNext : widget.onPrev, _direction);
+    } else if (t > 0.001) {
+      // 回弹：进度从拖拽处缓动收回 0（原来为瞬时跳变）
+      setState(() {
+        _snapBack = true;
+        _fromT = t;
+      });
+      await _ctrl.forward(from: 0);
+      if (mounted) {
+        setState(() {
+          _snapBack = false;
+          _fromT = 0;
+        });
+      }
     } else {
-      // 弹回
       if (mounted) setState(() {});
     }
   }
@@ -833,13 +851,25 @@ class _PageFlowState extends State<PageFlow>
             // 用实际阅读区宽度（版心收窄后 ≠ 窗口宽度）
             final width = bc.maxWidth;
             final hasOutgoing = _outgoing != null;
-            final t = _dragging ? _dragT : (hasOutgoing ? _ctrl.value : 0.0);
+            // 缓动进度：拖拽跟手为线性；松手/回弹用 easeOutCubic，
+            // 起始值经 _fromT 修正保证与拖拽进度无缝衔接
+            final c = Curves.easeOutCubic.transform(_ctrl.value);
+            final double t;
+            if (_dragging) {
+              t = _dragT;
+            } else if (_snapBack) {
+              t = _fromT * (1 - c);
+            } else if (hasOutgoing) {
+              t = _fromT + (1 - _fromT) * c;
+            } else {
+              t = 0.0;
+            }
             final dir = _direction;
             if (!hasOutgoing && t == 0) {
               return RepaintBoundary(child: widget.buildPage());
             }
             if (!hasOutgoing &&
-                _dragging &&
+                (_dragging || _snapBack) &&
                 widget.animType != PageTurnType.none) {
               // 拖拽反馈与松手后的动画状态无缝衔接（进度同为 t，松手不跳变）：
               // - 平移：当前页跟手全幅位移（松手后即为动画中旧页位置）
@@ -920,8 +950,10 @@ class _StackPages extends StatelessWidget {
     if (old == null || type == PageTurnType.none) return current;
     switch (type) {
       case PageTurnType.slide:
-        // 平移：双页刚性同步位移（经典 push）——
-        // 新页与旧页像两张连着的卡片一起移动，全程等速、无阴影层次
+        // 平移：双页同步位移的经典 push，叠加轻量层次——
+        // 新页前导边缘投影 + 旧页随进度轻微压暗，缓解「两张硬纸片平移」的平淡感
+        final inOff = dir * (1 - t) * width;
+        final edgeAlpha = 0.26 * (1 - t);
         return Stack(
           children: [
             Positioned.fill(
@@ -930,12 +962,47 @@ class _StackPages extends StatelessWidget {
                 child: RepaintBoundary(child: old),
               ),
             ),
+            // 旧页压暗（随翻页进度加深）
+            if (t > 0.001)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: ColoredBox(
+                    color: Colors.black.withValues(alpha: 0.12 * t),
+                  ),
+                ),
+              ),
             Positioned.fill(
               child: Transform.translate(
-                offset: Offset(dir * (1 - t) * width, 0),
+                offset: Offset(inOff, 0),
                 child: RepaintBoundary(child: current),
               ),
             ),
+            // 新页前导边缘投影：方向为右进时投影在其左缘，左进时在其右缘
+            if (edgeAlpha > 0.001)
+              Positioned(
+                left: dir > 0 ? inOff - 36 : width - (1 - t) * width,
+                width: 36,
+                top: 0,
+                bottom: 0,
+                child: IgnorePointer(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: dir > 0
+                            ? Alignment.centerLeft
+                            : Alignment.centerRight,
+                        end: dir > 0
+                            ? Alignment.centerRight
+                            : Alignment.centerLeft,
+                        colors: [
+                          Colors.transparent,
+                          Colors.black.withValues(alpha: edgeAlpha),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
           ],
         );
       case PageTurnType.cover:
@@ -974,8 +1041,8 @@ class _StackPages extends StatelessWidget {
             ),
             // 顶层页前导边缘投影（随滑动收敛），强化「上层卡片」立体感
             Positioned(
-              left: topOffset - 28,
-              width: 28,
+              left: topOffset - 36,
+              width: 36,
               top: 0,
               bottom: 0,
               child: IgnorePointer(
@@ -986,7 +1053,7 @@ class _StackPages extends StatelessWidget {
                       end: Alignment.centerRight,
                       colors: [
                         Colors.transparent,
-                        Colors.black.withValues(alpha: 0.28 * (1 - t)),
+                        Colors.black.withValues(alpha: 0.30 * (1 - t)),
                       ],
                     ),
                   ),
