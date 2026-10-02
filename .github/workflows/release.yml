@@ -95,12 +95,10 @@ jobs:
             echo "keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}"
           } > android/key.properties
       # 版本号以 meta 解析结果为准（覆盖 pubspec），build-number 用流水线序号保证单调
+      # 仅构建 arm64/arm32：发布产物只含 v8a/v7a（省去 AAB 与 x86_64 的构建时间）
       - run: >-
           flutter build apk --release --split-per-abi
-          --build-name=${{ needs.meta.outputs.version }}
-          --build-number=${{ github.run_number }}
-      - run: >-
-          flutter build appbundle --release
+          --target-platform android-arm,android-arm64
           --build-name=${{ needs.meta.outputs.version }}
           --build-number=${{ github.run_number }}
       - name: 重命名产物（带版本号）
@@ -112,7 +110,6 @@ jobs:
             mv "$f" "LiteRead-${VERSION}-$(echo "$f" | sed 's/^app-//;s/-release\.apk$//').apk"
           done
           cp ./*.apk /tmp/dist/
-          cp ../bundle/release/*.aab "/tmp/dist/LiteRead-${VERSION}.aab"
       - uses: actions/upload-artifact@v4
         with:
           name: android-out
@@ -160,10 +157,8 @@ jobs:
           cd dist/windows-out
           zip -qr "../../dist/release/LiteRead-${VERSION}-windows-x64.zip" .
           cd ../..
-      - name: 汇总产物与校验和
-        run: |
-          cp dist/android-out/* dist/release/
-          cd dist/release && find . -type f -exec sha256sum {} \; > SHA256SUMS.txt
+      - name: 汇总产物
+        run: cp dist/android-out/* dist/release/
       - name: 构建 Release 说明（仅编号式更新日志）
         run: |
           {
