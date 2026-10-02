@@ -120,9 +120,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
         // 视口注入（帧末执行，避免 build 期间副作用）
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) {
-            ref.read(readerControllerProvider.notifier).updateViewport(
-                  areaSize,
-                );
+            ref
+                .read(readerControllerProvider.notifier)
+                .updateViewport(areaSize);
           }
         });
         return Stack(
@@ -141,8 +141,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
             // 菜单浮层
             if (_menuVisible) _buildMenu(state, settings, spec, isDark),
             // 加载/错误
-            if (state.loading)
-              const Center(child: CircularProgressIndicator()),
+            if (state.loading) const Center(child: CircularProgressIndicator()),
             if (state.error != null)
               Center(
                 child: Padding(

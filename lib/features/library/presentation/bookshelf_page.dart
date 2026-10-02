@@ -154,9 +154,9 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
               )
               .toList();
           if (paths.isEmpty) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('暂不支持该文件格式')),
-            );
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(const SnackBar(content: Text('暂不支持该文件格式')));
             return;
           }
           _importPaths(paths);

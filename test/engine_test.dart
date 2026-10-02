@@ -335,8 +335,11 @@ List<int> _buildMinimalEpub() {
     <itemref idref="c2"/>
   </spine>
 </package>''');
-  add('OEBPS/chapter1.xhtml', '''
-<html><body><h1>第一章 标题</h1><img src="images/pic.png"/><p>这是第一章内容。</p></body></html>''');
+  add(
+    'OEBPS/chapter1.xhtml',
+    '''
+<html><body><h1>第一章 标题</h1><img src="images/pic.png"/><p>这是第一章内容。</p></body></html>''',
+  );
   add('OEBPS/chapter2.xhtml', '''
 <html><body><p>第二章内容继续。</p></body></html>''');
   add('OEBPS/toc.ncx', '''
