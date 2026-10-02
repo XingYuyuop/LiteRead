@@ -173,15 +173,6 @@ jobs:
             mv "$f" "LiteRead-${VERSION}-$(echo "$f" | sed 's/^app-//;s/-release\.apk$//').apk"
           done
           cp ./*.apk /tmp/dist/
-      # AAB（Play 商店格式）：全 ABI，签名与 APK 相同（key.properties）
-      - run: >-
-          flutter build appbundle --release
-          --build-name=${{ needs.meta.outputs.version }}
-          --build-number=${{ github.run_number }}
-      - name: 收集 AAB
-        run: |
-          VERSION=${{ needs.meta.outputs.version }}
-          cp build/app/outputs/bundle/release/app-release.aab "/tmp/dist/LiteRead-${VERSION}.aab"
       - uses: actions/upload-artifact@v4
         with:
           name: android-out
@@ -235,10 +226,6 @@ jobs:
           cd ../..
       - name: 汇总产物
         run: cp dist/android-out/* dist/release/
-      - name: 生成 SHA256SUMS.txt
-        run: |
-          cd dist/release
-          sha256sum LiteRead-*.zip LiteRead-*.apk LiteRead-*.aab > SHA256SUMS.txt
       - name: 构建 Release 说明（仅编号式更新日志）
         run: |
           {

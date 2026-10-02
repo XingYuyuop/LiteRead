@@ -284,38 +284,54 @@ class LanScanner {
     return null;
   }
 
-  /// Windows 防火墙放行本应用（入站允许规则）。
-  /// 扫描不到设备最常见的原因是防火墙拦截了入站连接；此方法通过 UAC
-  /// 提权添加程序级放行规则。返回 null 表示成功，否则为失败原因。
-  static Future<String?> allowThroughWindowsFirewall() async {
-    if (!Platform.isWindows) return '仅 Windows 需要防火墙放行';
+  /// 确保 Windows 防火墙已放行本应用（入站允许规则）。
+  /// 先无提权检查规则是否存在且指向当前程序路径（便携版换目录后旧规则
+  /// 会失效）；不满足时经 UAC 提权重建规则（同名规则 add 前必须 delete）。
+  /// 返回 null 表示已放行，否则为失败原因。
+  static Future<String?> ensureWindowsFirewallRule() async {
+    if (!Platform.isWindows) return null;
     const ruleName = 'LiteRead Sync';
-    try {
-      final exe = Platform.resolvedExecutable;
-      // powershell 单引号串保留内部双引号，netsh 按程序路径精确放行
-      final ps =
-          'Start-Process -FilePath netsh -Verb RunAs -Wait -ArgumentList '
-          "'advfirewall firewall add rule name=\"$ruleName\" dir=in action=allow program=\"$exe\" enable=yes'";
-      final r = await Process.run('powershell', ['-Command', ps]);
-      if (r.exitCode != 0) {
-        final err = (r.stderr as String?) ?? '';
-        if (err.contains('canceled') || err.contains('取消')) {
-          return '已取消授权（未添加规则）';
-        }
-        return '添加规则失败：$err';
-      }
-      // 验证规则确实存在（UAC 同意但 netsh 失败的情况）
+    final exe = Platform.resolvedExecutable;
+
+    /// 检查已有规则是否指向当前程序（必须 verbose 才输出 Program 字段；
+    /// netsh 输出可能按列宽换行，去掉全部空白后比较路径）
+    Future<bool> ruleMatches() async {
       final check = await Process.run('netsh', [
         'advfirewall',
         'firewall',
         'show',
         'rule',
         'name=$ruleName',
+        'verbose',
       ]);
-      final ok = (check.stdout as String).contains(ruleName);
-      return ok ? null : '规则添加未生效，请手动在防火墙设置中放行本应用';
+      final flat = (check.stdout as String).replaceAll(RegExp(r'\s'), '');
+      return flat
+          .toLowerCase()
+          .contains(exe.replaceAll(RegExp(r'\s'), '').toLowerCase());
+    }
+
+    try {
+      if (await ruleMatches()) return null;
+      // UAC 提权：先 delete 清掉旧路径规则，再 add 当前程序路径
+      final ps =
+          'Start-Process -FilePath cmd -Verb RunAs -Wait -ArgumentList '
+          "'/c netsh advfirewall firewall delete rule name=\"$ruleName\" & "
+          'netsh advfirewall firewall add rule name="$ruleName" dir=in '
+          'action=allow program="$exe" enable=yes\'';
+      final r = await Process.run('powershell', ['-Command', ps]);
+      if (r.exitCode != 0) {
+        final err = (r.stderr as String?) ?? '';
+        if (err.contains('canceled') || err.contains('取消')) {
+          return '已取消授权（未添加防火墙规则）';
+        }
+        return '添加防火墙规则失败：$err';
+      }
+      // 复验规则确实生效（UAC 同意但 netsh 失败的情况）
+      return await ruleMatches()
+          ? null
+          : '规则添加未生效，请手动在防火墙设置中放行本应用';
     } catch (e) {
-      return '执行失败：$e';
+      return '防火墙检查失败：$e';
     }
   }
 }
@@ -366,10 +382,11 @@ String lanConnectErrorText(Object e) {
   final s = e.toString();
   if (s.contains('TimedOutException') || s.contains('timed out')) {
     return '设备无响应（超时）。\n请确认两台设备连的是同一个网络（同一 WiFi/热点），'
-        '对端已开启「共享」；Windows 端请在共享页点「防火墙放行」。';
+        '对端已进入「备份 → 局域网设备」（进入即自动开启共享）。';
   }
   if (s.contains('Connection refused') || s.contains('拒绝')) {
-    return '设备拒绝连接（端口未开放）。\n请确认对端 LiteRead 已开启「共享」开关。';
+    return '设备拒绝连接（端口未开放）。\n请确认对端 LiteRead 已进入「备份 → 局域网设备」'
+        '（进入即自动开启共享）。';
   }
   if (s.contains('Network is unreachable') || s.contains('无法访问')) {
     return '网络不可达。\n请检查两台设备是否在同一网段，或改用手动输入 IP 连接。';

@@ -32,7 +32,15 @@ class _BackupPageState extends ConsumerState<BackupPage> {
 
   bool _scanning = false;
   List<LanDevice> _devices = const [];
-  bool _sharing = false;
+
+  /// 本机共享服务是否已开启（进局域网目标时自动开启，无手动开关）
+  bool _serverRunning = false;
+
+  /// Windows 防火墙规则是否已检查（会话内一次，避免重复弹 UAC）
+  bool _firewallChecked = false;
+
+  /// Windows 防火墙检查结果（null = 已放行或非 Windows）
+  String? _firewallHint;
 
   /// 最近连接成功的设备（扫描不到时一键重连，免手输 IP）
   List<LanDevice> _recentDevices = const [];
@@ -86,7 +94,7 @@ class _BackupPageState extends ConsumerState<BackupPage> {
     final cfg = await BackupConfig.load(ref.read(appDatabaseProvider));
     final defPath = await defaultBackupPath();
     if (!mounted) return;
-    final sharing = ref.read(lanSyncServerProvider).running;
+    final running = ref.read(lanSyncServerProvider).running;
     final recent = await _loadRecentDevices();
     if (!mounted) return;
     setState(() {
@@ -101,9 +109,12 @@ class _BackupPageState extends ConsumerState<BackupPage> {
       _s3KeyCtrl.text = cfg.s3AccessKey;
       _s3SecretCtrl.text = cfg.s3SecretKey;
       _s3RegionCtrl.text = cfg.s3Region;
-      _sharing = sharing;
+      _serverRunning = running;
       _recentDevices = recent;
     });
+    if (_cfg.type == BackupTargetType.lan) {
+      _ensureLanServer();
+    }
     _autoScanIfNeeded();
   }
 
@@ -467,24 +478,37 @@ class _BackupPageState extends ConsumerState<BackupPage> {
 
   // ---- 局域网 ----
 
-  Future<void> _toggleSharing(bool v) async {
+  /// 进入局域网目标时自动开启共享并确保防火墙放行（无需手动开关）。
+  /// 共享状态持久化，应用下次启动也会自动开放端口（lanBootstrapProvider）。
+  Future<void> _ensureLanServer() async {
     final server = ref.read(lanSyncServerProvider);
-    try {
-      if (v) {
+    if (!server.running) {
+      try {
         await server.start();
-      } else {
-        await server.stop();
+        await ref
+            .read(appDatabaseProvider)
+            .setSetting('backup.lanSharing', 'true');
+      } catch (e) {
+        _toast('开启共享失败：$e');
       }
-      await ref
-          .read(appDatabaseProvider)
-          .setSetting('backup.lanSharing', v ? 'true' : 'false');
-      if (mounted) {
-        setState(() => _sharing = server.running);
-      }
-      _toast(v ? '共享已开启，端口 ${server.port}' : '共享已关闭');
-    } catch (e) {
-      _toast('共享开启失败：$e');
     }
+    if (mounted) {
+      setState(() => _serverRunning = server.running);
+    }
+    // Windows：确保防火墙入站规则指向当前程序（便携版换目录后旧规则失效）
+    if (Platform.isWindows && !_firewallChecked) {
+      _firewallChecked = true;
+      final err = await LanScanner.ensureWindowsFirewallRule();
+      if (!mounted) return;
+      setState(() => _firewallHint = err);
+    }
+  }
+
+  /// 重试防火墙放行（拒绝 UAC 后可再次触发）
+  Future<void> _retryFirewall() async {
+    _firewallChecked = false;
+    setState(() => _firewallHint = null);
+    await _ensureLanServer();
   }
 
   Future<void> _scanDevices() async {
@@ -495,8 +519,8 @@ class _BackupPageState extends ConsumerState<BackupPage> {
       setState(() => _devices = found);
       if (found.isEmpty) {
         _toast(
-          '未发现局域网设备：请确认对端已开启「共享本机书库」、'
-          '两台设备连同一网络${Platform.isWindows ? '，并尝试下方「防火墙放行」' : ''}',
+          '未发现局域网设备：请确认对端已进入「备份」页并选择「局域网设备」'
+          '（进入即自动开启共享），且两台设备连同一网络',
         );
       }
     } catch (e) {
@@ -529,8 +553,8 @@ class _BackupPageState extends ConsumerState<BackupPage> {
       if (!mounted) return;
       if (device == null) {
         _toast(
-          '连接失败：$host 未响应。\n请确认对端已开启「共享本机书库」且地址正确，'
-          '两台设备连同一网络${Platform.isWindows ? '，或尝试「防火墙放行」' : ''}',
+          '连接失败：$host 未响应。\n请确认对端已进入「备份」页选择「局域网设备」'
+          '（自动开启共享），地址正确且两台设备连同一网络',
         );
         return;
       }
@@ -538,13 +562,6 @@ class _BackupPageState extends ConsumerState<BackupPage> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
-  }
-
-  /// Windows 防火墙放行（UAC 提权添加入站允许规则）
-  Future<void> _allowFirewall() async {
-    _toast('正在请求管理员权限添加防火墙规则…');
-    final err = await LanScanner.allowThroughWindowsFirewall();
-    _toast(err ?? '防火墙已放行，其他设备现在可以扫描到本机了');
   }
 
   /// 进入局域网配置或首次加载时自动扫描一次
@@ -574,8 +591,7 @@ class _BackupPageState extends ConsumerState<BackupPage> {
       setState(() => _busy = false);
       _toast(
         '连接 ${d.name} 失败：设备无响应。\n请确认两台设备连同一网络、'
-        '对端已开启「共享本机书库」'
-        '${Platform.isWindows ? '，Windows 端请尝试「防火墙放行」' : ''}',
+        '对端已进入「备份」页选择「局域网设备」（自动开启共享）',
       );
       return;
     }
@@ -947,6 +963,8 @@ class _BackupPageState extends ConsumerState<BackupPage> {
                 onTap: () {
                   _update((c) => c.copyWith(type: t));
                   if (t == BackupTargetType.lan) {
+                    // 选中局域网设备即自动开启共享（并确保防火墙放行）
+                    _ensureLanServer();
                     _autoScanIfNeeded();
                   }
                 },
@@ -1147,18 +1165,19 @@ class _BackupPageState extends ConsumerState<BackupPage> {
   List<Widget> _buildLanConfig() {
     final server = ref.read(lanSyncServerProvider);
     return [
-      SwitchListTile(
-        title: const Text('共享本机书库'),
-        subtitle: Text(
-          _sharing
-              ? '端口 ${server.port} 已开放，其他设备可扫描到本机'
-              : '开启后开放端口，供其他 LiteRead 设备扫描连接',
+      // 共享状态展示：进本页自动开启（无手动开关）
+      if (_serverRunning)
+        ListTile(
+          dense: true,
+          leading: Icon(
+            Icons.share_outlined,
+            color: Theme.of(context).colorScheme.primary,
+          ),
+          title: const Text('本机共享已开启'),
+          subtitle: Text('端口 ${server.port} · 其他设备可扫描连接本机'),
         ),
-        value: _sharing,
-        onChanged: _busy ? null : _toggleSharing,
-      ),
       // 对端同步进度：本机作为接收方实时展示（双方设备都有进度显示）
-      if (_sharing)
+      if (_serverRunning)
         ValueListenableBuilder<LanSyncProgress?>(
           valueListenable: server.syncProgress,
           builder: (ctx, p, _) {
@@ -1238,13 +1257,16 @@ class _BackupPageState extends ConsumerState<BackupPage> {
           ],
         ),
       ),
-      if (Platform.isWindows)
+      // Windows 防火墙：进页自动检查放行（缺失时请求一次 UAC），
+      // 失败（如拒绝 UAC）时给出重试入口
+      if (Platform.isWindows && _firewallHint != null)
         ListTile(
           dense: true,
-          leading: const Icon(Icons.security_outlined),
-          title: const Text('防火墙放行'),
-          subtitle: const Text('其他设备扫描不到本机时点击（需管理员权限）'),
-          onTap: _allowFirewall,
+          leading: const Icon(Icons.warning_amber_outlined),
+          title: const Text('防火墙未放行'),
+          subtitle: Text(_firewallHint!),
+          trailing: const Icon(Icons.refresh),
+          onTap: _busy ? null : _retryFirewall,
         ),
       for (final d in _devices)
         ListTile(

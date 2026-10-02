@@ -212,8 +212,7 @@ void _walkBlock(
   // EPUB3 脚注/尾注容器：提取为脚注内容，不展开进正文流
   // （否则注释文字会混入正文，且注标点击无内容可看）
   final epubType =
-      (node.attributes['epub:type'] ?? node.attributes['type'] ?? '')
-          .toLowerCase();
+      (_attr(node, 'epub:type') ?? _attr(node, 'type') ?? '').toLowerCase();
   final fid = node.attributes['id'];
   if (fid != null &&
       fid.isNotEmpty &&
@@ -248,7 +247,7 @@ void _walkBlock(
       }
       return;
     case 'img':
-      final src = node.attributes['src'] ?? node.attributes['xlink:href'];
+      final src = _attr(node, 'src') ?? _attr(node, 'xlink:href');
       if (src != null && src.isNotEmpty) {
         ctx.blocks.add(
           Block(
@@ -261,7 +260,7 @@ void _walkBlock(
       }
       return;
     case 'image': // SVG 内嵌 image
-      final href = node.attributes['href'] ?? node.attributes['xlink:href'];
+      final href = _attr(node, 'href') ?? _attr(node, 'xlink:href');
       if (href != null && href.isNotEmpty) {
         ctx.blocks.add(
           Block(
@@ -475,8 +474,8 @@ Block _paragraphOf(List<InlineRun> runs, int quoteDepth, BlockAlign align) =>
 /// 是则返回目标脚注 id（href 锚点，不含 #）；跨文件注标同样取其锚点，
 /// 内容在阅读器侧全书范围解析。
 String? _noterefTarget(dom.Element a) {
-  final epubType = (a.attributes['epub:type'] ?? a.attributes['type'] ?? '')
-      .toLowerCase();
+  final epubType =
+      (_attr(a, 'epub:type') ?? _attr(a, 'type') ?? '').toLowerCase();
   final cls = (a.attributes['class'] ?? '').toLowerCase();
   final isNoteref =
       epubType.contains('noteref') ||
@@ -569,9 +568,9 @@ List<InlineRun> _inlineRuns(dom.Node node) {
   }
   if (tag == 'img' || tag == 'image') {
     final src =
-        node.attributes['src'] ??
-        node.attributes['xlink:href'] ??
-        node.attributes['href'];
+        _attr(node, 'src') ??
+        _attr(node, 'xlink:href') ??
+        _attr(node, 'href');
     final resolved = src == null || src.isEmpty ? null : _resolveSrc(src);
     if (resolved != null) {
       // 行内图片（含注标角标图）：占位符 run，渲染层绘制真实图片，
@@ -620,6 +619,20 @@ List<InlineRun> _inlineRuns(dom.Node node) {
     out.addAll(_inlineRuns(c));
   }
   return out;
+}
+
+/// 读取元素属性。
+///
+/// 不能直接用 `attributes[name]`：dart html 包对带命名空间的属性
+/// （SVG 的 xlink:href、foreign content 内的 xlink:* / xml:* 等）
+/// 以 [AttributeName] 对象为 key，其 toString() 是 'xlink:href' 但
+/// 不等于字符串 'xlink:href'，字符串下标永远取不到 → SVG 插图全部
+/// 提取失败（插图页整页空白）。这里统一按 toString 匹配。
+String? _attr(dom.Element el, String name) {
+  for (final e in el.attributes.entries) {
+    if (e.key.toString() == name) return e.value;
+  }
+  return null;
 }
 
 /// 解析相对路径，剥离锚点

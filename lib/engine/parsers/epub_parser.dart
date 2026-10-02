@@ -245,7 +245,10 @@ class EpubParser {
     // 章节标题回填：凡落到「第 N 节」兜底（无标题块，或标题块提取失败）
     // 的章节，优先取指向该章章首（charOffset == 0）的目录条目（如
     // 「插图」「序章」），其次该章第一条目录；仅当目录无条目时，无标题
-    // 章节再退回 html `<title>`（如「Cover」），最后保留「第 N 节」。
+    // 章节再退回 html `<title>`（如「Cover」）；目录与 html title 都没有
+    // 时（轻小说正文章节间的插图页、后记续页等），继承前一章标题——
+    // 这些页属于前一章的一部分，否则阅读页翻页跨过它们时左上角章节名
+    // 会从「第一话」跳成「第 N 节」。
     // 修复阅读页章节名与目录名不一致（目录有名、章名仍显示第 N 节）的 bug
     final fallbackTitleRe = RegExp(r'^第 \d+ 节$');
     for (var i = 0; i < chapters.length; i++) {
@@ -261,7 +264,14 @@ class EpubParser {
       }
       final tocTitle = best?.title.trim() ?? '';
       final htmlTitle = noHeadingHtmlTitles[i]?.trim() ?? '';
-      final title = tocTitle.isNotEmpty ? tocTitle : htmlTitle;
+      var title = tocTitle.isNotEmpty ? tocTitle : htmlTitle;
+      if (title.isEmpty && i > 0) {
+        final prev = chapters[i - 1].title.trim();
+        // 前一章自身仍是兜底标题时不继承（避免把「第 N 节」向前扩散）
+        if (prev.isNotEmpty && !fallbackTitleRe.hasMatch(prev)) {
+          title = prev;
+        }
+      }
       if (title.isNotEmpty) {
         chapters[i] = Chapter(
           id: chapters[i].id,
