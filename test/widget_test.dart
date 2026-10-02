@@ -34,7 +34,7 @@ void main() {
     await tester.pumpAndSettle();
 
     // 书架骨架：标题 + 搜索 + 导入按钮 + 空状态
-    expect(find.text('轻阅'), findsOneWidget);
+    expect(find.text('LiteRead'), findsOneWidget);
     expect(find.byTooltip('搜索'), findsOneWidget);
     expect(find.byTooltip('设置'), findsOneWidget);
     expect(find.text('导入书籍'), findsOneWidget);

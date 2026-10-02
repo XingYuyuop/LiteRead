@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/theme/reader_theme.dart';
+import '../features/backup/logic/backup_config.dart';
 import '../features/reader/logic/reader_settings.dart';
 import 'router.dart';
 import 'theme_controller.dart';
@@ -24,7 +25,7 @@ class LiteReadApp extends ConsumerWidget {
         : null;
 
     return MaterialApp.router(
-      title: '轻阅 LiteRead',
+      title: 'LiteRead',
       debugShowCheckedModeBanner: false,
       routerConfig: router,
       themeMode: themeState.mode == ThemeModeChoice.followSystem
@@ -71,6 +72,8 @@ class AppScope extends StatelessWidget {
         builder: (context, ref, _) {
           // 预热设置
           ref.watch(readerSettingsProvider);
+          // 恢复局域网共享开关状态（上次开启过则自动开放端口）
+          ref.watch(lanBootstrapProvider);
           return const LiteReadApp();
         },
       ),

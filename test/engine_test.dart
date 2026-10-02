@@ -1,7 +1,9 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:archive/archive.dart';
+import 'package:flutter/painting.dart' show EdgeInsets, Offset;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:literead/engine/ir/book_document.dart';
 import 'package:literead/engine/pagination/text_paginator.dart';
@@ -9,6 +11,8 @@ import 'package:literead/engine/parsers/book_parser.dart';
 import 'package:literead/engine/parsers/epub_parser.dart';
 import 'package:literead/engine/parsers/md_parser.dart';
 import 'package:literead/engine/parsers/txt_parser.dart';
+import 'package:literead/features/reader/presentation/page_flow.dart'
+    show PageCanvas;
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -150,6 +154,23 @@ void main() {}
         () => const EpubParser().parse(zip),
         throwsA(isA<BookParseException>()),
       );
+    });
+
+    test('EPUB3 nav.xhtml 目录：:scope 选择器回归（不抛 UnimplementedError）', () async {
+      final bytes = _buildEpub3WithNav();
+      final result = await const EpubParser().parse(bytes);
+      final doc = result.document;
+
+      expect(doc.meta.title, '导航测试');
+      expect(doc.spine, hasLength(2));
+      // nav.xhtml 目录正确解析（含嵌套层级）
+      expect(doc.toc, hasLength(3));
+      expect(doc.toc[0].title, '第一章');
+      expect(doc.toc[0].spineIndex, 0);
+      expect(doc.toc[1].title, '第一节');
+      expect(doc.toc[1].depth, 1);
+      expect(doc.toc[2].title, '第二章');
+      expect(doc.toc[2].spineIndex, 1);
     });
   });
 
@@ -296,11 +317,138 @@ void main() {}
       expect(doc.totalChars, 400);
       expect(doc.globalCharsBefore(1), 100);
     });
+
+    test('首行缩进对所有自然段生效（每段均带缩进前缀）', () async {
+      // 回归 #14：缩进应作用于全部自然段，而非仅第一章第一段
+      final blocks = List.generate(
+        3,
+        (i) => _para('这是第$i个自然段的内容，应当有首行缩进。' * 4),
+      );
+      final chapter = Chapter(id: 'c5', title: '章五', blocks: blocks);
+      final laid = await const TextPaginator().paginate(
+        chapter: chapter,
+        spineIndex: 0,
+        styles: styles,
+      );
+      final paras = laid.blocks.where((lb) => !lb.isImage).toList();
+      expect(paras.length, 3);
+      for (var i = 0; i < paras.length; i++) {
+        expect(paras[i].prefixChars, 2, reason: '第${i + 1}个自然段缺少缩进前缀');
+        // charBase 与 Chapter.blockOffsets 一致（批注坐标基准）
+        expect(paras[i].charBase, chapter.blockOffsets[i]);
+      }
+    });
+
+    test('hitTestChar：屏幕坐标 → 章内字符偏移往返', () async {
+      final blocks = List.generate(
+        3,
+        (i) => _para('批注命中测试段落$i，长按选中这一段文字。' * 5),
+      );
+      final chapter = Chapter(id: 'c6', title: '章六', blocks: blocks);
+      final laid = await const TextPaginator().paginate(
+        chapter: chapter,
+        spineIndex: 0,
+        styles: styles,
+      );
+      final page = laid.pages.first;
+      expect(page.units, isNotEmpty);
+      final unit = page.units.first;
+      final lb = laid.blocks[unit.blockIndex];
+      // 页内第一个文本单元第一行中线（与绘制几何一致）
+      final local = Offset(
+        12,
+        lb.lineTops[unit.firstLine] + lb.lineHeights[unit.firstLine] / 2,
+      );
+      final hit = PageCanvas.hitTestChar(laid, page, EdgeInsets.zero, local);
+      expect(hit, isNotNull);
+      expect(
+        hit,
+        inInclusiveRange(lb.charBase, lb.charBase + lb.block.plainText.length),
+      );
+      // 落点在首字符附近（x=12 < 一个字宽）→ 命中块首前 2 字符内
+      expect(
+        hit! - lb.charBase,
+        lessThanOrEqualTo(2),
+        reason: 'x=12 应命中该块行首附近',
+      );
+    });
+  });
+
+  group('后台 isolate 解析（文件打开性能优化）', () {
+    test('EPUB 经 Isolate.run 解析：资源闭包跨 isolate 仍可用', () async {
+      final tmp = await Directory.systemTemp.createTemp('literead_test');
+      final f = File('${tmp.path}${Platform.pathSeparator}t.epub');
+      await f.writeAsBytes(_buildMinimalEpub());
+      try {
+        final out = await const BookParser().parseFile(f.path);
+        expect(out.document.meta.title, '测试之书');
+        expect(out.format, BookFormat.epub);
+        // ResourceStore 内含闭包，跨 isolate 传回后必须仍能读资源
+        final img = await out.document.resources.get('OEBPS/images/cover.png');
+        expect(img, isNotNull);
+        expect(img, hasLength(4));
+      } finally {
+        await tmp.delete(recursive: true);
+      }
+    });
   });
 }
 
 Block _para(String text) =>
     Block(type: BlockType.paragraph, spans: [InlineRun(text)]);
+
+/// 构造 EPUB3（带 nav.xhtml 嵌套目录）zip，用于 :scope 回归测试
+List<int> _buildEpub3WithNav() {
+  final archive = Archive();
+  void add(String name, String content) => archive.addFile(
+    ArchiveFile(name, utf8.encode(content).length, utf8.encode(content)),
+  );
+
+  add('mimetype', 'application/epub+zip');
+  add('META-INF/container.xml', '''
+<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>''');
+  add('OEBPS/content.opf', '''
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>导航测试</dc:title>
+    <dc:creator>作者</dc:creator>
+    <dc:language>zh</dc:language>
+  </metadata>
+  <manifest>
+    <item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+  </manifest>
+  <spine>
+    <itemref idref="c1"/>
+    <itemref idref="c2"/>
+  </spine>
+</package>''');
+  add('OEBPS/ch1.xhtml', '<html><body><h1>第一章</h1><p>内容一。</p></body></html>');
+  add('OEBPS/ch2.xhtml', '<html><body><h1>第二章</h1><p>内容二。</p></body></html>');
+  add('OEBPS/nav.xhtml', '''
+<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<body>
+  <nav epub:type="toc">
+    <ol>
+      <li><a href="ch1.xhtml">第一章</a>
+        <ol>
+          <li><a href="ch1.xhtml#s1">第一节</a></li>
+        </ol>
+      </li>
+      <li><a href="ch2.xhtml">第二章</a></li>
+    </ol>
+  </nav>
+</body>
+</html>''');
+
+  return ZipEncoder().encode(archive);
+}
 
 /// 构造最小合法 EPUB（zip）：container.xml + OPF + 2 章 + NCX + PNG
 List<int> _buildMinimalEpub() {

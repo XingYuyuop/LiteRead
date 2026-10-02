@@ -123,12 +123,16 @@ class BookMeta {
     required this.title,
     this.author,
     this.language,
+    this.description,
     this.coverResource,
   });
 
   final String title;
   final String? author;
   final String? language;
+
+  /// 书籍简介（EPUB dc:description 等）
+  final String? description;
 
   /// 封面资源 id（EPUB 内部路径或独立存储 key）
   final String? coverResource;

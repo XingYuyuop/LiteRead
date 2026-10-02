@@ -3,8 +3,10 @@ name: release
 # 计划书 §7.3：云端打包发布
 # 两条触发路径：
 #   1. push tag v*        → 正式版（stable）：Android 签名 APK/AAB + Windows 便携包 → GitHub Release
-#   2. workflow_dispatch  → 可选 stable / beta 通道；beta 以 prerelease 形式发布
-#                          （版本号取 pubspec.yaml，beta 自动追加 -beta.N）
+#   2. workflow_dispatch  → 可选 stable / beta 通道
+# 版本号规则（X.Y.Z.W，每位 0..9，9 进位，如 0.0.0.9 → 0.0.1.0）：
+#   - 正式版（workflow_dispatch stable）：自动取远端 tag 最大版本并逐位递增，起始 0.0.0.1
+#   - beta：同一基准版本 + -beta.N 后缀，以 prerelease 形式发布
 on:
   push:
     tags: ['v*']
@@ -31,19 +33,45 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: ver
+        env:
+          EVENT: ${{ github.event_name }}
+          CH: ${{ inputs.channel }}
         run: |
-          BASE=$(grep '^version:' pubspec.yaml | sed 's/version: \([0-9.]*\)+.*/\1/')
-          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
-            # tag 触发：优先用 tag 名
-            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          set -e
+          # 远端 tag 中最大的 vX.Y.Z.W（不足 4 段补 .0，忽略 beta 等非法版本）
+          MAX=$(git ls-remote --tags origin 'v*' \
+            | awk '{print $2}' \
+            | sed 's|refs/tags/||; s|\^\{\}$||' \
+            | while read -r t; do
+                v="${t#v}"
+                while [ "$(echo "$v" | awk -F. '{print NF}')" -lt 4 ]; do v="$v.0"; done
+                if echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+                  echo "$v"
+                fi
+              done | sort -V | tail -1)
+          [ -z "$MAX" ] && MAX="0.0.0.0"
+          # 逐位递增：每位 0..9，9 进位（0.0.0.9 → 0.0.1.0）
+          NEXT=$(printf '%s' "$MAX" | awk -F. '{
+            d=$4+1; c=$3; b=$2; a=$1;
+            if (d>9) { d=0; c++ }
+            if (c>9) { c=0; b++ }
+            if (b>9) { b=0; a++ }
+            printf "%d.%d.%d.%d", a, b, c, d
+          }')
+          if [ "$EVENT" = "push" ]; then
+            # tag 触发：以 tag 名为准（补足 4 段）
+            V="${GITHUB_REF_NAME#v}"
+            while [ "$(echo "$V" | awk -F. '{print NF}')" -lt 4 ]; do V="$V.0"; done
+            echo "version=$V" >> "$GITHUB_OUTPUT"
             echo "channel=stable" >> "$GITHUB_OUTPUT"
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ inputs.channel }}" == "stable" ]]; then
-            echo "version=$BASE" >> "$GITHUB_OUTPUT"
+          elif [ "$CH" = "stable" ]; then
+            # 正式版：版本号自动递增（无历史 tag 时从 0.0.0.1 开始）
+            echo "version=$NEXT" >> "$GITHUB_OUTPUT"
             echo "channel=stable" >> "$GITHUB_OUTPUT"
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           else
-            echo "version=${BASE}-beta.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+            echo "version=${NEXT}-beta.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
             echo "channel=beta" >> "$GITHUB_OUTPUT"
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           fi
@@ -75,8 +103,15 @@ jobs:
             echo "keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}"
             echo "keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}"
           } > android/key.properties
-      - run: flutter build apk --release --split-per-abi
-      - run: flutter build appbundle --release
+      # 版本号以 meta 解析结果为准（覆盖 pubspec），build-number 用流水线序号保证单调
+      - run: >-
+          flutter build apk --release --split-per-abi
+          --build-name=${{ needs.meta.outputs.version }}
+          --build-number=${{ github.run_number }}
+      - run: >-
+          flutter build appbundle --release
+          --build-name=${{ needs.meta.outputs.version }}
+          --build-number=${{ github.run_number }}
       - name: 重命名产物（带版本号）
         run: |
           VERSION=${{ needs.meta.outputs.version }}
@@ -105,16 +140,17 @@ jobs:
       - run: flutter pub get
       - run: flutter test
       # release 构建：避免 debug CRT 依赖导致用户机器上「双击打不开」
-      - run: flutter build windows --release
-      - name: 打包便携 zip
-        shell: pwsh
-        run: |
-          $version = "${{ needs.meta.outputs.version }}"
-          Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath "LiteRead-$version-windows-x64.zip"
+      - run: >-
+          flutter build windows --release
+          --build-name=${{ needs.meta.outputs.version }}
+          --build-number=${{ github.run_number }}
+      # 工件直接上传 Release 目录内容（扁平）：
+      # 从 Actions 下载工件时解压即得应用文件，不再出现 zip 套 zip；
+      # 最终发布 zip 由 release 任务统一打包。
       - uses: actions/upload-artifact@v4
         with:
           name: windows-out
-          path: LiteRead-*.zip
+          path: build/windows/x64/runner/Release/*
 
   release:
     needs: [meta, build-android, build-windows]
@@ -123,8 +159,17 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with: { path: dist }
-      - name: 生成校验和
-        run: cd dist && find . -type f -exec sha256sum {} \; > SHA256SUMS.txt
+      - name: 打包 Windows 便携 zip（扁平结构：解压直接呈现应用文件）
+        run: |
+          VERSION=${{ needs.meta.outputs.version }}
+          mkdir -p dist/release
+          cd dist/windows-out
+          zip -qr "../../dist/release/LiteRead-${VERSION}-windows-x64.zip" .
+          cd ../..
+      - name: 汇总产物与校验和
+        run: |
+          cp dist/android-out/* dist/release/
+          cd dist/release && find . -type f -exec sha256sum {} \; > SHA256SUMS.txt
       - name: 构建 Release 说明
         run: |
           {
@@ -136,7 +181,7 @@ jobs:
             fi
             echo "### 下载指引"
             echo "- **Android**：\`LiteRead-<版本>-arm64-v8a.apk\`（绝大多数现代手机）/ \`armeabi-v7a.apk\`（老设备）"
-            echo "- **Windows**：\`LiteRead-<版本>-windows-x64.zip\`，解压后运行 \`literead.exe\`（免安装便携版）"
+            echo "- **Windows**：\`LiteRead-<版本>-windows-x64.zip\`，解压后直接运行 \`literead.exe\`（免安装便携版）"
             echo "- 完整性校验见 \`SHA256SUMS.txt\`"
             echo ""
             echo "> Windows SmartScreen 可能对未签名程序弹窗，点击「仍要运行」即可（计划书 R4）。"
@@ -144,7 +189,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.meta.outputs.version }}
-          files: dist/**
+          files: dist/release/**
           prerelease: ${{ needs.meta.outputs.prerelease }}
           body_path: release-body.md
           generate_release_notes: true

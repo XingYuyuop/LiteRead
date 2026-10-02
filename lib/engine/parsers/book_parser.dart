@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'epub_parser.dart' show BookParseException, EpubParser;
 export 'epub_parser.dart' show BookParseException;
@@ -77,7 +78,16 @@ BookFormat detectFormat(String path, List<int> bytes) {
 class BookParser {
   const BookParser();
 
+  /// 性能优化：EPUB/MOBI/MD/TXT 的全量解析（zip 解压 + 逐章 HTML 解析）
+  /// 在后台 isolate 执行，避免大文件打开时阻塞 UI 造成「打开慢」。
+  /// PDF 依赖 pdfrx 原生插件上下文，保留在主 isolate（本身开销很小）。
   Future<ParseOutput> parseFile(String path, {List<int>? bytesHint}) async {
+    final format = formatFromExtension(path);
+    if (format == BookFormat.pdf) return _parseSync(path);
+    return Isolate.run(() => _parseSync(path));
+  }
+
+  Future<ParseOutput> _parseSync(String path, {List<int>? bytesHint}) async {
     final bytes = bytesHint ?? await File(path).readAsBytes();
     final format = detectFormat(path, bytes);
 

@@ -121,6 +121,17 @@ class $BooksTable extends Books with TableInfo<$BooksTable, Book> {
     type: DriftSqlType.string,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _groupNameMeta = const VerificationMeta(
+    'groupName',
+  );
+  @override
+  late final GeneratedColumn<String> groupName = GeneratedColumn<String>(
+    'group_name',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -134,6 +145,7 @@ class $BooksTable extends Books with TableInfo<$BooksTable, Book> {
     addedAt,
     lastReadAt,
     metaJson,
+    groupName,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -223,6 +235,12 @@ class $BooksTable extends Books with TableInfo<$BooksTable, Book> {
         metaJson.isAcceptableOrUnknown(data['meta_json']!, _metaJsonMeta),
       );
     }
+    if (data.containsKey('group_name')) {
+      context.handle(
+        _groupNameMeta,
+        groupName.isAcceptableOrUnknown(data['group_name']!, _groupNameMeta),
+      );
+    }
     return context;
   }
 
@@ -276,6 +294,10 @@ class $BooksTable extends Books with TableInfo<$BooksTable, Book> {
         DriftSqlType.string,
         data['${effectivePrefix}meta_json'],
       ),
+      groupName: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}group_name'],
+      ),
     );
   }
 
@@ -298,6 +320,9 @@ class Book extends DataClass implements Insertable<Book> {
   final int addedAt;
   final int? lastReadAt;
   final String? metaJson;
+
+  /// 书架分组名（null = 未分组）
+  final String? groupName;
   const Book({
     required this.id,
     required this.title,
@@ -310,6 +335,7 @@ class Book extends DataClass implements Insertable<Book> {
     required this.addedAt,
     this.lastReadAt,
     this.metaJson,
+    this.groupName,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -336,6 +362,9 @@ class Book extends DataClass implements Insertable<Book> {
     }
     if (!nullToAbsent || metaJson != null) {
       map['meta_json'] = Variable<String>(metaJson);
+    }
+    if (!nullToAbsent || groupName != null) {
+      map['group_name'] = Variable<String>(groupName);
     }
     return map;
   }
@@ -365,6 +394,9 @@ class Book extends DataClass implements Insertable<Book> {
       metaJson: metaJson == null && nullToAbsent
           ? const Value.absent()
           : Value(metaJson),
+      groupName: groupName == null && nullToAbsent
+          ? const Value.absent()
+          : Value(groupName),
     );
   }
 
@@ -385,6 +417,7 @@ class Book extends DataClass implements Insertable<Book> {
       addedAt: serializer.fromJson<int>(json['addedAt']),
       lastReadAt: serializer.fromJson<int?>(json['lastReadAt']),
       metaJson: serializer.fromJson<String?>(json['metaJson']),
+      groupName: serializer.fromJson<String?>(json['groupName']),
     );
   }
   @override
@@ -402,6 +435,7 @@ class Book extends DataClass implements Insertable<Book> {
       'addedAt': serializer.toJson<int>(addedAt),
       'lastReadAt': serializer.toJson<int?>(lastReadAt),
       'metaJson': serializer.toJson<String?>(metaJson),
+      'groupName': serializer.toJson<String?>(groupName),
     };
   }
 
@@ -417,6 +451,7 @@ class Book extends DataClass implements Insertable<Book> {
     int? addedAt,
     Value<int?> lastReadAt = const Value.absent(),
     Value<String?> metaJson = const Value.absent(),
+    Value<String?> groupName = const Value.absent(),
   }) => Book(
     id: id ?? this.id,
     title: title ?? this.title,
@@ -429,6 +464,7 @@ class Book extends DataClass implements Insertable<Book> {
     addedAt: addedAt ?? this.addedAt,
     lastReadAt: lastReadAt.present ? lastReadAt.value : this.lastReadAt,
     metaJson: metaJson.present ? metaJson.value : this.metaJson,
+    groupName: groupName.present ? groupName.value : this.groupName,
   );
   Book copyWithCompanion(BooksCompanion data) {
     return Book(
@@ -445,6 +481,7 @@ class Book extends DataClass implements Insertable<Book> {
           ? data.lastReadAt.value
           : this.lastReadAt,
       metaJson: data.metaJson.present ? data.metaJson.value : this.metaJson,
+      groupName: data.groupName.present ? data.groupName.value : this.groupName,
     );
   }
 
@@ -461,7 +498,8 @@ class Book extends DataClass implements Insertable<Book> {
           ..write('coverPath: $coverPath, ')
           ..write('addedAt: $addedAt, ')
           ..write('lastReadAt: $lastReadAt, ')
-          ..write('metaJson: $metaJson')
+          ..write('metaJson: $metaJson, ')
+          ..write('groupName: $groupName')
           ..write(')'))
         .toString();
   }
@@ -479,6 +517,7 @@ class Book extends DataClass implements Insertable<Book> {
     addedAt,
     lastReadAt,
     metaJson,
+    groupName,
   );
   @override
   bool operator ==(Object other) =>
@@ -494,7 +533,8 @@ class Book extends DataClass implements Insertable<Book> {
           other.coverPath == this.coverPath &&
           other.addedAt == this.addedAt &&
           other.lastReadAt == this.lastReadAt &&
-          other.metaJson == this.metaJson);
+          other.metaJson == this.metaJson &&
+          other.groupName == this.groupName);
 }
 
 class BooksCompanion extends UpdateCompanion<Book> {
@@ -509,6 +549,7 @@ class BooksCompanion extends UpdateCompanion<Book> {
   final Value<int> addedAt;
   final Value<int?> lastReadAt;
   final Value<String?> metaJson;
+  final Value<String?> groupName;
   final Value<int> rowid;
   const BooksCompanion({
     this.id = const Value.absent(),
@@ -522,6 +563,7 @@ class BooksCompanion extends UpdateCompanion<Book> {
     this.addedAt = const Value.absent(),
     this.lastReadAt = const Value.absent(),
     this.metaJson = const Value.absent(),
+    this.groupName = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   BooksCompanion.insert({
@@ -536,6 +578,7 @@ class BooksCompanion extends UpdateCompanion<Book> {
     required int addedAt,
     this.lastReadAt = const Value.absent(),
     this.metaJson = const Value.absent(),
+    this.groupName = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : id = Value(id),
        title = Value(title),
@@ -554,6 +597,7 @@ class BooksCompanion extends UpdateCompanion<Book> {
     Expression<int>? addedAt,
     Expression<int>? lastReadAt,
     Expression<String>? metaJson,
+    Expression<String>? groupName,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -568,6 +612,7 @@ class BooksCompanion extends UpdateCompanion<Book> {
       if (addedAt != null) 'added_at': addedAt,
       if (lastReadAt != null) 'last_read_at': lastReadAt,
       if (metaJson != null) 'meta_json': metaJson,
+      if (groupName != null) 'group_name': groupName,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -584,6 +629,7 @@ class BooksCompanion extends UpdateCompanion<Book> {
     Value<int>? addedAt,
     Value<int?>? lastReadAt,
     Value<String?>? metaJson,
+    Value<String?>? groupName,
     Value<int>? rowid,
   }) {
     return BooksCompanion(
@@ -598,6 +644,7 @@ class BooksCompanion extends UpdateCompanion<Book> {
       addedAt: addedAt ?? this.addedAt,
       lastReadAt: lastReadAt ?? this.lastReadAt,
       metaJson: metaJson ?? this.metaJson,
+      groupName: groupName ?? this.groupName,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -638,6 +685,9 @@ class BooksCompanion extends UpdateCompanion<Book> {
     if (metaJson.present) {
       map['meta_json'] = Variable<String>(metaJson.value);
     }
+    if (groupName.present) {
+      map['group_name'] = Variable<String>(groupName.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -658,6 +708,7 @@ class BooksCompanion extends UpdateCompanion<Book> {
           ..write('addedAt: $addedAt, ')
           ..write('lastReadAt: $lastReadAt, ')
           ..write('metaJson: $metaJson, ')
+          ..write('groupName: $groupName, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -1090,6 +1141,18 @@ class $HighlightsTable extends Highlights
     type: DriftSqlType.int,
     requiredDuringInsert: true,
   );
+  static const VerificationMeta _styleIndexMeta = const VerificationMeta(
+    'styleIndex',
+  );
+  @override
+  late final GeneratedColumn<int> styleIndex = GeneratedColumn<int>(
+    'style_index',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
   static const VerificationMeta _noteMeta = const VerificationMeta('note');
   @override
   late final GeneratedColumn<String> note = GeneratedColumn<String>(
@@ -1143,6 +1206,7 @@ class $HighlightsTable extends Highlights
     locatorJson,
     selectedText,
     colorIndex,
+    styleIndex,
     note,
     createdAt,
     updatedAt,
@@ -1203,6 +1267,12 @@ class $HighlightsTable extends Highlights
     } else if (isInserting) {
       context.missing(_colorIndexMeta);
     }
+    if (data.containsKey('style_index')) {
+      context.handle(
+        _styleIndexMeta,
+        styleIndex.isAcceptableOrUnknown(data['style_index']!, _styleIndexMeta),
+      );
+    }
     if (data.containsKey('note')) {
       context.handle(
         _noteMeta,
@@ -1260,6 +1330,10 @@ class $HighlightsTable extends Highlights
         DriftSqlType.int,
         data['${effectivePrefix}color_index'],
       )!,
+      styleIndex: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}style_index'],
+      )!,
       note: attachedDatabase.typeMapping.read(
         DriftSqlType.string,
         data['${effectivePrefix}note'],
@@ -1291,6 +1365,9 @@ class Highlight extends DataClass implements Insertable<Highlight> {
   final String locatorJson;
   final String selectedText;
   final int colorIndex;
+
+  /// 划线线型：0=背景高亮 1=直线下划线 2=波浪下划线（v2 新增）
+  final int styleIndex;
   final String? note;
   final int createdAt;
   final int updatedAt;
@@ -1301,6 +1378,7 @@ class Highlight extends DataClass implements Insertable<Highlight> {
     required this.locatorJson,
     required this.selectedText,
     required this.colorIndex,
+    required this.styleIndex,
     this.note,
     required this.createdAt,
     required this.updatedAt,
@@ -1314,6 +1392,7 @@ class Highlight extends DataClass implements Insertable<Highlight> {
     map['locator_json'] = Variable<String>(locatorJson);
     map['selected_text'] = Variable<String>(selectedText);
     map['color_index'] = Variable<int>(colorIndex);
+    map['style_index'] = Variable<int>(styleIndex);
     if (!nullToAbsent || note != null) {
       map['note'] = Variable<String>(note);
     }
@@ -1330,6 +1409,7 @@ class Highlight extends DataClass implements Insertable<Highlight> {
       locatorJson: Value(locatorJson),
       selectedText: Value(selectedText),
       colorIndex: Value(colorIndex),
+      styleIndex: Value(styleIndex),
       note: note == null && nullToAbsent ? const Value.absent() : Value(note),
       createdAt: Value(createdAt),
       updatedAt: Value(updatedAt),
@@ -1348,6 +1428,7 @@ class Highlight extends DataClass implements Insertable<Highlight> {
       locatorJson: serializer.fromJson<String>(json['locatorJson']),
       selectedText: serializer.fromJson<String>(json['selectedText']),
       colorIndex: serializer.fromJson<int>(json['colorIndex']),
+      styleIndex: serializer.fromJson<int>(json['styleIndex']),
       note: serializer.fromJson<String?>(json['note']),
       createdAt: serializer.fromJson<int>(json['createdAt']),
       updatedAt: serializer.fromJson<int>(json['updatedAt']),
@@ -1363,6 +1444,7 @@ class Highlight extends DataClass implements Insertable<Highlight> {
       'locatorJson': serializer.toJson<String>(locatorJson),
       'selectedText': serializer.toJson<String>(selectedText),
       'colorIndex': serializer.toJson<int>(colorIndex),
+      'styleIndex': serializer.toJson<int>(styleIndex),
       'note': serializer.toJson<String?>(note),
       'createdAt': serializer.toJson<int>(createdAt),
       'updatedAt': serializer.toJson<int>(updatedAt),
@@ -1376,6 +1458,7 @@ class Highlight extends DataClass implements Insertable<Highlight> {
     String? locatorJson,
     String? selectedText,
     int? colorIndex,
+    int? styleIndex,
     Value<String?> note = const Value.absent(),
     int? createdAt,
     int? updatedAt,
@@ -1386,6 +1469,7 @@ class Highlight extends DataClass implements Insertable<Highlight> {
     locatorJson: locatorJson ?? this.locatorJson,
     selectedText: selectedText ?? this.selectedText,
     colorIndex: colorIndex ?? this.colorIndex,
+    styleIndex: styleIndex ?? this.styleIndex,
     note: note.present ? note.value : this.note,
     createdAt: createdAt ?? this.createdAt,
     updatedAt: updatedAt ?? this.updatedAt,
@@ -1404,6 +1488,9 @@ class Highlight extends DataClass implements Insertable<Highlight> {
       colorIndex: data.colorIndex.present
           ? data.colorIndex.value
           : this.colorIndex,
+      styleIndex: data.styleIndex.present
+          ? data.styleIndex.value
+          : this.styleIndex,
       note: data.note.present ? data.note.value : this.note,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
       updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
@@ -1419,6 +1506,7 @@ class Highlight extends DataClass implements Insertable<Highlight> {
           ..write('locatorJson: $locatorJson, ')
           ..write('selectedText: $selectedText, ')
           ..write('colorIndex: $colorIndex, ')
+          ..write('styleIndex: $styleIndex, ')
           ..write('note: $note, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt, ')
@@ -1434,6 +1522,7 @@ class Highlight extends DataClass implements Insertable<Highlight> {
     locatorJson,
     selectedText,
     colorIndex,
+    styleIndex,
     note,
     createdAt,
     updatedAt,
@@ -1448,6 +1537,7 @@ class Highlight extends DataClass implements Insertable<Highlight> {
           other.locatorJson == this.locatorJson &&
           other.selectedText == this.selectedText &&
           other.colorIndex == this.colorIndex &&
+          other.styleIndex == this.styleIndex &&
           other.note == this.note &&
           other.createdAt == this.createdAt &&
           other.updatedAt == this.updatedAt &&
@@ -1460,6 +1550,7 @@ class HighlightsCompanion extends UpdateCompanion<Highlight> {
   final Value<String> locatorJson;
   final Value<String> selectedText;
   final Value<int> colorIndex;
+  final Value<int> styleIndex;
   final Value<String?> note;
   final Value<int> createdAt;
   final Value<int> updatedAt;
@@ -1471,6 +1562,7 @@ class HighlightsCompanion extends UpdateCompanion<Highlight> {
     this.locatorJson = const Value.absent(),
     this.selectedText = const Value.absent(),
     this.colorIndex = const Value.absent(),
+    this.styleIndex = const Value.absent(),
     this.note = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.updatedAt = const Value.absent(),
@@ -1483,6 +1575,7 @@ class HighlightsCompanion extends UpdateCompanion<Highlight> {
     required String locatorJson,
     required String selectedText,
     required int colorIndex,
+    this.styleIndex = const Value.absent(),
     this.note = const Value.absent(),
     required int createdAt,
     required int updatedAt,
@@ -1501,6 +1594,7 @@ class HighlightsCompanion extends UpdateCompanion<Highlight> {
     Expression<String>? locatorJson,
     Expression<String>? selectedText,
     Expression<int>? colorIndex,
+    Expression<int>? styleIndex,
     Expression<String>? note,
     Expression<int>? createdAt,
     Expression<int>? updatedAt,
@@ -1513,6 +1607,7 @@ class HighlightsCompanion extends UpdateCompanion<Highlight> {
       if (locatorJson != null) 'locator_json': locatorJson,
       if (selectedText != null) 'selected_text': selectedText,
       if (colorIndex != null) 'color_index': colorIndex,
+      if (styleIndex != null) 'style_index': styleIndex,
       if (note != null) 'note': note,
       if (createdAt != null) 'created_at': createdAt,
       if (updatedAt != null) 'updated_at': updatedAt,
@@ -1527,6 +1622,7 @@ class HighlightsCompanion extends UpdateCompanion<Highlight> {
     Value<String>? locatorJson,
     Value<String>? selectedText,
     Value<int>? colorIndex,
+    Value<int>? styleIndex,
     Value<String?>? note,
     Value<int>? createdAt,
     Value<int>? updatedAt,
@@ -1539,6 +1635,7 @@ class HighlightsCompanion extends UpdateCompanion<Highlight> {
       locatorJson: locatorJson ?? this.locatorJson,
       selectedText: selectedText ?? this.selectedText,
       colorIndex: colorIndex ?? this.colorIndex,
+      styleIndex: styleIndex ?? this.styleIndex,
       note: note ?? this.note,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
@@ -1564,6 +1661,9 @@ class HighlightsCompanion extends UpdateCompanion<Highlight> {
     }
     if (colorIndex.present) {
       map['color_index'] = Variable<int>(colorIndex.value);
+    }
+    if (styleIndex.present) {
+      map['style_index'] = Variable<int>(styleIndex.value);
     }
     if (note.present) {
       map['note'] = Variable<String>(note.value);
@@ -1591,6 +1691,7 @@ class HighlightsCompanion extends UpdateCompanion<Highlight> {
           ..write('locatorJson: $locatorJson, ')
           ..write('selectedText: $selectedText, ')
           ..write('colorIndex: $colorIndex, ')
+          ..write('styleIndex: $styleIndex, ')
           ..write('note: $note, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt, ')
@@ -2420,6 +2521,7 @@ typedef $$BooksTableCreateCompanionBuilder =
       required int addedAt,
       Value<int?> lastReadAt,
       Value<String?> metaJson,
+      Value<String?> groupName,
       Value<int> rowid,
     });
 typedef $$BooksTableUpdateCompanionBuilder =
@@ -2435,6 +2537,7 @@ typedef $$BooksTableUpdateCompanionBuilder =
       Value<int> addedAt,
       Value<int?> lastReadAt,
       Value<String?> metaJson,
+      Value<String?> groupName,
       Value<int> rowid,
     });
 
@@ -2498,6 +2601,11 @@ class $$BooksTableFilterComposer extends Composer<_$AppDatabase, $BooksTable> {
 
   ColumnFilters<String> get metaJson => $composableBuilder(
     column: $table.metaJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get groupName => $composableBuilder(
+    column: $table.groupName,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -2565,6 +2673,11 @@ class $$BooksTableOrderingComposer
     column: $table.metaJson,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get groupName => $composableBuilder(
+    column: $table.groupName,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$BooksTableAnnotationComposer
@@ -2610,6 +2723,9 @@ class $$BooksTableAnnotationComposer
 
   GeneratedColumn<String> get metaJson =>
       $composableBuilder(column: $table.metaJson, builder: (column) => column);
+
+  GeneratedColumn<String> get groupName =>
+      $composableBuilder(column: $table.groupName, builder: (column) => column);
 }
 
 class $$BooksTableTableManager
@@ -2651,6 +2767,7 @@ class $$BooksTableTableManager
                 Value<int> addedAt = const Value.absent(),
                 Value<int?> lastReadAt = const Value.absent(),
                 Value<String?> metaJson = const Value.absent(),
+                Value<String?> groupName = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => BooksCompanion(
                 id: id,
@@ -2664,6 +2781,7 @@ class $$BooksTableTableManager
                 addedAt: addedAt,
                 lastReadAt: lastReadAt,
                 metaJson: metaJson,
+                groupName: groupName,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -2679,6 +2797,7 @@ class $$BooksTableTableManager
                 required int addedAt,
                 Value<int?> lastReadAt = const Value.absent(),
                 Value<String?> metaJson = const Value.absent(),
+                Value<String?> groupName = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => BooksCompanion.insert(
                 id: id,
@@ -2692,6 +2811,7 @@ class $$BooksTableTableManager
                 addedAt: addedAt,
                 lastReadAt: lastReadAt,
                 metaJson: metaJson,
+                groupName: groupName,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0
@@ -2925,6 +3045,7 @@ typedef $$HighlightsTableCreateCompanionBuilder =
       required String locatorJson,
       required String selectedText,
       required int colorIndex,
+      Value<int> styleIndex,
       Value<String?> note,
       required int createdAt,
       required int updatedAt,
@@ -2938,6 +3059,7 @@ typedef $$HighlightsTableUpdateCompanionBuilder =
       Value<String> locatorJson,
       Value<String> selectedText,
       Value<int> colorIndex,
+      Value<int> styleIndex,
       Value<String?> note,
       Value<int> createdAt,
       Value<int> updatedAt,
@@ -2976,6 +3098,11 @@ class $$HighlightsTableFilterComposer
 
   ColumnFilters<int> get colorIndex => $composableBuilder(
     column: $table.colorIndex,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get styleIndex => $composableBuilder(
+    column: $table.styleIndex,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -3034,6 +3161,11 @@ class $$HighlightsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<int> get styleIndex => $composableBuilder(
+    column: $table.styleIndex,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<String> get note => $composableBuilder(
     column: $table.note,
     builder: (column) => ColumnOrderings(column),
@@ -3082,6 +3214,11 @@ class $$HighlightsTableAnnotationComposer
 
   GeneratedColumn<int> get colorIndex => $composableBuilder(
     column: $table.colorIndex,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get styleIndex => $composableBuilder(
+    column: $table.styleIndex,
     builder: (column) => column,
   );
 
@@ -3134,6 +3271,7 @@ class $$HighlightsTableTableManager
                 Value<String> locatorJson = const Value.absent(),
                 Value<String> selectedText = const Value.absent(),
                 Value<int> colorIndex = const Value.absent(),
+                Value<int> styleIndex = const Value.absent(),
                 Value<String?> note = const Value.absent(),
                 Value<int> createdAt = const Value.absent(),
                 Value<int> updatedAt = const Value.absent(),
@@ -3145,6 +3283,7 @@ class $$HighlightsTableTableManager
                 locatorJson: locatorJson,
                 selectedText: selectedText,
                 colorIndex: colorIndex,
+                styleIndex: styleIndex,
                 note: note,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
@@ -3158,6 +3297,7 @@ class $$HighlightsTableTableManager
                 required String locatorJson,
                 required String selectedText,
                 required int colorIndex,
+                Value<int> styleIndex = const Value.absent(),
                 Value<String?> note = const Value.absent(),
                 required int createdAt,
                 required int updatedAt,
@@ -3169,6 +3309,7 @@ class $$HighlightsTableTableManager
                 locatorJson: locatorJson,
                 selectedText: selectedText,
                 colorIndex: colorIndex,
+                styleIndex: styleIndex,
                 note: note,
                 createdAt: createdAt,
                 updatedAt: updatedAt,

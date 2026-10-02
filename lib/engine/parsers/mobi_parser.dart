@@ -1,5 +1,7 @@
 import 'dart:typed_data';
 
+import 'package:gbk_codec/gbk_codec.dart';
+
 import '../ir/book_document.dart';
 import 'epub_parser.dart' show BookParseException;
 import 'html_lite_converter.dart';
@@ -66,6 +68,7 @@ class MobiParser {
     // ---- MOBI header（可选：老 PRC 无此头） ----
     var textEncoding = 1252; // 默认 Latin-1
     var firstImageIndex = -1;
+    var extraFlags = 0; // 记录尾部附加数据标志（KF8/AZW3 必有）
     String? fullName;
     final hasMobiHeader = rec0.length >= 24 && _ascii(rec0, 16, 'MOBI');
     if (hasMobiHeader) {
@@ -74,6 +77,10 @@ class MobiParser {
           rec0.length >= absOffset + 4 && 16 + headerLength > absOffset;
       if (has(28)) textEncoding = _u32(rec0, 28);
       if (has(108)) firstImageIndex = _u32(rec0, 108);
+      // 242 = MOBI header 内的 extra record data flags（16 位）
+      if (rec0.length >= 244 && 16 + headerLength >= 244) {
+        extraFlags = _u16(rec0, 242);
+      }
       if (has(84) && has(88)) {
         final off = _u32(rec0, 84);
         final len = _u32(rec0, 88);
@@ -115,13 +122,16 @@ class MobiParser {
     }
 
     // ---- 文本记录解压拼接 ----
+    // 关键修复：KF8/AZW3 记录尾部带附加数据（extra data flags），
+    // 不剥离会污染 LZ77 解压流，导致整本书乱码。
     final textBytes = BytesBuilder(copy: false);
     for (var i = 1; i <= textRecordCount && i < numRecords; i++) {
       final raw = record(i);
+      final clean = extraFlags != 0 ? _stripTrailingData(raw, extraFlags) : raw;
       if (compression == 2) {
-        textBytes.add(palmDocDecompress(raw));
+        textBytes.add(palmDocDecompress(clean));
       } else {
-        textBytes.add(raw);
+        textBytes.add(clean);
       }
     }
     var all = textBytes.toBytes();
@@ -246,6 +256,56 @@ class MobiParser {
 
   // ---- PalmDOC LZ77 解压（compression==2） ----
 
+  /// 剥离记录尾部的附加数据（extra record data entries）。
+  ///
+  /// 规则（MobileRead MOBI 规范 / KindleUnpack 实现）：
+  ///  - flags 位 15..1：每个附加条目的长度由记录尾部「反序变长整数」给出；
+  ///  - flags 位 0：条目长度由尾部 1-4 字节（高位 bit 作为终止/继续标志）编码。
+  static Uint8List _stripTrailingData(Uint8List data, int flags) {
+    var end = data.length;
+    for (var bit = 15; bit >= 1; bit--) {
+      if (flags & (1 << bit) == 0) continue;
+      final size = _readBackwardVarint(data, end);
+      if (size <= 0 || size > end) break;
+      end -= size;
+    }
+    if (flags & 1 != 0 && end > 0) {
+      end -= _trailingEntrySize(data, end);
+    }
+    if (end <= 0 || end >= data.length) return data;
+    return Uint8List.sublistView(data, 0, end);
+  }
+
+  /// 反序变长整数：从尾部向前读，每字节低 7 位按位权累加，高位为 0 终止
+  static int _readBackwardVarint(Uint8List data, int end) {
+    var pos = end;
+    var result = 0;
+    var bitpos = 0;
+    while (pos > 0) {
+      final v = data[pos - 1];
+      result |= (v & 0x7F) << bitpos;
+      pos--;
+      bitpos += 7;
+      if (v & 0x80 == 0 || bitpos >= 35) return result;
+    }
+    return result;
+  }
+
+  /// flags 位 0 的条目长度编码：反序读，每字节的最高位累加进结果
+  static int _trailingEntrySize(Uint8List data, int end) {
+    var pos = end;
+    var result = 0;
+    var bitpos = 0;
+    while (pos > 0 && bitpos < 4) {
+      final v = data[pos - 1];
+      result |= (v & 0x80) >> bitpos;
+      pos--;
+      bitpos++;
+      if (v & 0x80 == 0) return result;
+    }
+    return result;
+  }
+
   /// 经典 PalmDOC（LZ77 滑动窗口，距离 11bit / 长度 3-10）解压。
   static Uint8List palmDocDecompress(List<int> data) {
     final out = <int>[];
@@ -292,12 +352,33 @@ class MobiParser {
   static int _u32(List<int> b, int o) =>
       (b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3];
 
-  /// 按 MOBI textEncoding 解码：65001=UTF-8（容错），其余按 Latin-1（CP1252 近似）
+  /// 按 MOBI textEncoding 解码：65001=UTF-8（容错）。
+  /// 中文 MOBI 常错误标注 1252：高位字节占比明显时回退 GBK 解码，修复乱码。
   static String _decode(List<int> data, int encoding) {
     if (encoding == 65001) {
       return utf8DecodeBestEffort(data);
     }
+    var high = 0;
+    for (var i = 0; i < data.length; i++) {
+      if (data[i] >= 0x80) high++;
+    }
+    if (high > 0 && high * 10 >= data.length) {
+      try {
+        final text = gbk_bytes.decode(data);
+        if (_hasCJK(text)) return text;
+      } catch (_) {
+        // 非 GBK 内容，退回 Latin-1
+      }
+    }
     return String.fromCharCodes(data);
+  }
+
+  static bool _hasCJK(String s) {
+    for (var i = 0; i < s.length; i++) {
+      final c = s.codeUnitAt(i);
+      if (c >= 0x4E00 && c <= 0x9FFF) return true;
+    }
+    return false;
   }
 }
 

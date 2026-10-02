@@ -86,6 +86,13 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
   bool _importing = false;
   bool _dragging = false;
 
+  // ---- 批量管理模式 ----
+  bool _selectionMode = false;
+  final Set<String> _selectedIds = {};
+
+  // ---- 分组筛选（null = 全部） ----
+  String? _filterGroup;
+
   @override
   Widget build(BuildContext context) {
     final themeState = ref.watch(themeControllerProvider);
@@ -96,131 +103,396 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
     final repo = ref.watch(bookRepositoryProvider);
     final colorScheme = Theme.of(context).colorScheme;
 
-    return Scaffold(
-      backgroundColor: colorScheme.surface,
-      appBar: AppBar(
-        title: const Text(
-          '轻阅',
-          style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: 2),
-        ),
-        backgroundColor: Colors.transparent,
-        actions: [
-          IconButton(
-            tooltip: '搜索',
-            icon: const Icon(Icons.search),
-            onPressed: () => _showSearch(context),
-          ),
-          PopupMenuButton<BookSort>(
-            tooltip: '排序',
-            icon: const Icon(Icons.sort),
-            onSelected: (s) => ref
-                .read(bookshelfPrefsProvider.notifier)
-                .update((p) => p.copyWith(sort: s)),
-            itemBuilder: (context) => [
-              const PopupMenuItem(
-                value: BookSort.lastRead,
-                child: Text('最近阅读'),
+    return PopScope(
+      // 批量模式下先退出批量模式
+      canPop: !_selectionMode,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && _selectionMode) {
+          setState(() {
+            _selectionMode = false;
+            _selectedIds.clear();
+          });
+        }
+      },
+      child: Scaffold(
+        backgroundColor: colorScheme.surface,
+        appBar: _selectionMode
+            ? _buildSelectionAppBar()
+            : AppBar(
+                title: const Text(
+                  'LiteRead',
+                  style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: 2),
+                ),
+                backgroundColor: Colors.transparent,
+                actions: [
+                  IconButton(
+                    tooltip: '搜索',
+                    icon: const Icon(Icons.search),
+                    onPressed: () => _showSearch(context),
+                  ),
+                  PopupMenuButton<BookSort>(
+                    tooltip: '排序',
+                    icon: const Icon(Icons.sort),
+                    onSelected: (s) => ref
+                        .read(bookshelfPrefsProvider.notifier)
+                        .update((p) => p.copyWith(sort: s)),
+                    itemBuilder: (context) => [
+                      const PopupMenuItem(
+                        value: BookSort.lastRead,
+                        child: Text('最近阅读'),
+                      ),
+                      const PopupMenuItem(
+                        value: BookSort.addedAt,
+                        child: Text('添加时间'),
+                      ),
+                      const PopupMenuItem(value: BookSort.title, child: Text('书名')),
+                    ],
+                  ),
+                  IconButton(
+                    tooltip: '视图',
+                    icon: Icon(prefs.grid ? Icons.view_list : Icons.grid_view),
+                    onPressed: () => ref
+                        .read(bookshelfPrefsProvider.notifier)
+                        .update((p) => p.copyWith(grid: !p.grid)),
+                  ),
+                  IconButton(
+                    tooltip: '设置',
+                    icon: const Icon(Icons.settings_outlined),
+                    onPressed: () => context.push('/settings'),
+                  ),
+                ],
               ),
-              const PopupMenuItem(value: BookSort.addedAt, child: Text('添加时间')),
-              const PopupMenuItem(value: BookSort.title, child: Text('书名')),
+        body: DropTarget(
+          // 桌面端拖拽导入（FR-A03）
+          onDragEntered: (_) => setState(() => _dragging = true),
+          onDragExited: (_) => setState(() => _dragging = false),
+          onDragDone: (details) {
+            setState(() => _dragging = false);
+            final paths = details.files
+                .map((f) => f.path)
+                .where(
+                  (p) => _supportedExtensions.contains(
+                    p.toLowerCase().split('.').last,
+                  ),
+                )
+                .toList();
+            if (paths.isEmpty) {
+              ScaffoldMessenger.of(
+                context,
+              ).showSnackBar(const SnackBar(content: Text('暂不支持该文件格式')));
+              return;
+            }
+            _importPaths(paths);
+          },
+          child: Stack(
+            children: [
+              StreamBuilder<List<Book>>(
+                stream: repo.watchBooks(sort: prefs.sort),
+                builder: (context, snap) {
+                  final all = snap.data ?? const <Book>[];
+                  // 分组列表实时从书籍数据推导
+                  final groups = all
+                      .map((b) => b.groupName)
+                      .whereType<String>()
+                      .where((g) => g.isNotEmpty)
+                      .toSet()
+                      .toList()
+                    ..sort();
+                  var books = all;
+                  if (_filterGroup != null) {
+                    books = books
+                        .where((b) => b.groupName == _filterGroup)
+                        .toList();
+                  }
+                  if (_keyword.isNotEmpty) {
+                    final k = _keyword.toLowerCase();
+                    books = books
+                        .where(
+                          (b) =>
+                              b.title.toLowerCase().contains(k) ||
+                              (b.author ?? '').toLowerCase().contains(k),
+                        )
+                        .toList();
+                  }
+                  if (all.isEmpty) {
+                    return _EmptyState(importing: _importing);
+                  }
+                  return Column(
+                    children: [
+                      // 分组筛选条（有分组时显示）
+                      if (groups.isNotEmpty && !_selectionMode)
+                        _buildGroupChips(groups, all),
+                      Expanded(
+                        child: RefreshIndicator(
+                          onRefresh: () async {},
+                          child: prefs.grid
+                              ? GridView.builder(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    20,
+                                    8,
+                                    20,
+                                    96,
+                                  ),
+                                  gridDelegate:
+                                      const SliverGridDelegateWithMaxCrossAxisExtent(
+                                        maxCrossAxisExtent: 140,
+                                        mainAxisSpacing: 24,
+                                        crossAxisSpacing: 20,
+                                        childAspectRatio: 0.58,
+                                      ),
+                                  itemCount: books.length,
+                                  itemBuilder: (context, i) => _BookCard(
+                                    book: books[i],
+                                    spec: spec,
+                                    selectionMode: _selectionMode,
+                                    selected: _selectedIds.contains(books[i].id),
+                                    onTap: () =>
+                                        _onBookTap(books[i], selectionMode: _selectionMode),
+                                    onLongPress: () =>
+                                        _onBookLongPress(books[i]),
+                                  ),
+                                )
+                              : ListView.builder(
+                                  padding: const EdgeInsets.fromLTRB(8, 4, 8, 96),
+                                  itemCount: books.length,
+                                  itemBuilder: (context, i) => _BookTile(
+                                    book: books[i],
+                                    spec: spec,
+                                    selectionMode: _selectionMode,
+                                    selected: _selectedIds.contains(books[i].id),
+                                    onTap: () => _onBookTap(
+                                      books[i],
+                                      selectionMode: _selectionMode,
+                                    ),
+                                    onLongPress: () =>
+                                        _onBookLongPress(books[i]),
+                                  ),
+                                ),
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
+              // 拖拽悬停提示层
+              if (_dragging) _DropOverlay(spec: spec),
             ],
           ),
-          IconButton(
-            tooltip: '视图',
-            icon: Icon(prefs.grid ? Icons.view_list : Icons.grid_view),
-            onPressed: () => ref
-                .read(bookshelfPrefsProvider.notifier)
-                .update((p) => p.copyWith(grid: !p.grid)),
-          ),
-          IconButton(
-            tooltip: '设置',
-            icon: const Icon(Icons.settings_outlined),
-            onPressed: () => context.push('/settings'),
-          ),
-        ],
-      ),
-      body: DropTarget(
-        // 桌面端拖拽导入（FR-A03）
-        onDragEntered: (_) => setState(() => _dragging = true),
-        onDragExited: (_) => setState(() => _dragging = false),
-        onDragDone: (details) {
-          setState(() => _dragging = false);
-          final paths = details.files
-              .map((f) => f.path)
-              .where(
-                (p) => _supportedExtensions.contains(
-                  p.toLowerCase().split('.').last,
-                ),
-              )
-              .toList();
-          if (paths.isEmpty) {
-            ScaffoldMessenger.of(
-              context,
-            ).showSnackBar(const SnackBar(content: Text('暂不支持该文件格式')));
-            return;
-          }
-          _importPaths(paths);
-        },
-        child: Stack(
-          children: [
-            StreamBuilder<List<Book>>(
-              stream: repo.watchBooks(sort: prefs.sort),
-              builder: (context, snap) {
-                var books = snap.data ?? const <Book>[];
-                if (_keyword.isNotEmpty) {
-                  final k = _keyword.toLowerCase();
-                  books = books
-                      .where(
-                        (b) =>
-                            b.title.toLowerCase().contains(k) ||
-                            (b.author ?? '').toLowerCase().contains(k),
+        ),
+        floatingActionButton: _selectionMode
+            ? null
+            : FloatingActionButton.extended(
+                heroTag: 'import',
+                onPressed: _importing ? null : _importBooks,
+                icon: _importing
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
                       )
-                      .toList();
-                }
-                if (books.isEmpty) {
-                  return _EmptyState(importing: _importing);
-                }
-                return RefreshIndicator(
-                  onRefresh: () async {},
-                  child: prefs.grid
-                      ? GridView.builder(
-                          padding: const EdgeInsets.fromLTRB(20, 8, 20, 96),
-                          gridDelegate:
-                              const SliverGridDelegateWithMaxCrossAxisExtent(
-                                maxCrossAxisExtent: 140,
-                                mainAxisSpacing: 24,
-                                crossAxisSpacing: 20,
-                                childAspectRatio: 0.58,
-                              ),
-                          itemCount: books.length,
-                          itemBuilder: (context, i) =>
-                              _BookCard(book: books[i], spec: spec),
-                        )
-                      : ListView.builder(
-                          padding: const EdgeInsets.fromLTRB(8, 4, 8, 96),
-                          itemCount: books.length,
-                          itemBuilder: (context, i) =>
-                              _BookTile(book: books[i], spec: spec),
-                        ),
-                );
-              },
-            ),
-            // 拖拽悬停提示层
-            if (_dragging) _DropOverlay(spec: spec),
+                    : const Icon(Icons.add),
+                label: Text(_importing ? '导入中…' : '导入书籍'),
+              ),
+      ),
+    );
+  }
+
+  PreferredSizeWidget _buildSelectionAppBar() {
+    final cs = Theme.of(context).colorScheme;
+    final count = _selectedIds.length;
+    return AppBar(
+      leading: IconButton(
+        tooltip: '退出多选',
+        icon: const Icon(Icons.close),
+        onPressed: () => setState(() {
+          _selectionMode = false;
+          _selectedIds.clear();
+        }),
+      ),
+      title: Text('已选 $count 本'),
+      backgroundColor: cs.surfaceContainerHighest.withValues(alpha: 0.5),
+      actions: [
+        IconButton(
+          tooltip: '全选/取消全选',
+          icon: const Icon(Icons.select_all),
+          onPressed: _toggleSelectAll,
+        ),
+        IconButton(
+          tooltip: '移动到分组',
+          icon: const Icon(Icons.drive_file_move_outline),
+          onPressed: count == 0 ? null : _batchMoveToGroup,
+        ),
+        IconButton(
+          tooltip: '删除所选',
+          icon: Icon(Icons.delete_outline, color: cs.error),
+          onPressed: count == 0 ? null : _batchDelete,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildGroupChips(List<String> groups, List<Book> all) {
+    final counts = <String, int>{};
+    for (final b in all) {
+      final g = b.groupName;
+      if (g != null && g.isNotEmpty) {
+        counts[g] = (counts[g] ?? 0) + 1;
+      }
+    }
+    Widget chip(String? label, String? value, int count) {
+      final selected = _filterGroup == value;
+      return Padding(
+        padding: const EdgeInsets.only(right: 8),
+        child: ChoiceChip(
+          label: Text('$label $count'),
+          selected: selected,
+          showCheckmark: false,
+          visualDensity: VisualDensity.compact,
+          onSelected: (_) => setState(() => _filterGroup = value),
+        ),
+      );
+    }
+
+    final ungrouped = all.where(
+      (b) => b.groupName == null || b.groupName!.isEmpty,
+    ).length;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            chip('全部', null, all.length),
+            for (final g in groups) chip(g, g, counts[g] ?? 0),
+            if (ungrouped > 0) chip('未分组', '', ungrouped),
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        heroTag: 'import',
-        onPressed: _importing ? null : _importBooks,
-        icon: _importing
-            ? const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            : const Icon(Icons.add),
-        label: Text(_importing ? '导入中…' : '导入书籍'),
+    );
+  }
+
+  void _onBookTap(Book book, {required bool selectionMode}) {
+    if (selectionMode) {
+      setState(() {
+        if (_selectedIds.contains(book.id)) {
+          _selectedIds.remove(book.id);
+        } else {
+          _selectedIds.add(book.id);
+        }
+      });
+      return;
+    }
+    context.push('/reader/${book.id}');
+  }
+
+  void _onBookLongPress(Book book) {
+    if (_selectionMode) {
+      _onBookTap(book, selectionMode: true);
+      return;
+    }
+    showBookActions(context, ref, book, onMultiSelect: () {
+      setState(() {
+        _selectionMode = true;
+        _selectedIds.add(book.id);
+      });
+    });
+  }
+
+  void _toggleSelectAll() {
+    // 全选当前筛选下可见的书
+    final prefs = ref.read(bookshelfPrefsProvider);
+    ref.read(bookRepositoryProvider).listBooks(sort: prefs.sort).then((all) {
+      var filtered = all;
+      if (_filterGroup != null) {
+        filtered = filtered.where((b) => b.groupName == _filterGroup).toList();
+      }
+      if (_keyword.isNotEmpty) {
+        final k = _keyword.toLowerCase();
+        filtered = filtered
+            .where(
+              (b) =>
+                  b.title.toLowerCase().contains(k) ||
+                  (b.author ?? '').toLowerCase().contains(k),
+            )
+            .toList();
+      }
+      final allSelected =
+          filtered.isNotEmpty && filtered.every((b) => _selectedIds.contains(b.id));
+      if (!mounted) return;
+      setState(() {
+        if (allSelected) {
+          _selectedIds.clear();
+        } else {
+          _selectedIds.addAll(filtered.map((b) => b.id));
+        }
+      });
+    });
+  }
+
+  Future<void> _batchDelete() async {
+    final ids = _selectedIds.toList();
+    if (ids.isEmpty) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('批量删除'),
+        content: Text(
+          '确定删除选中的 ${ids.length} 本书籍？\n书籍文件、阅读进度与批注将一并删除。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+            ),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await ref.read(bookRepositoryProvider).deleteBooks(ids);
+    if (!mounted) return;
+    setState(() {
+      _selectedIds.clear();
+      _selectionMode = false;
+    });
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('已删除 ${ids.length} 本书籍')));
+  }
+
+  Future<void> _batchMoveToGroup() async {
+    final ids = _selectedIds.toList();
+    if (ids.isEmpty) return;
+    final group = await _pickGroupDialog(initialGroup: null);
+    if (group == null) return; // 取消
+    await ref.read(bookRepositoryProvider).setGroups(ids, group);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          group.isEmpty ? '已移出分组（${ids.length} 本）' : '已移入「$group」（${ids.length} 本）',
+        ),
+      ),
+    );
+  }
+
+  /// 分组选择对话框：返回 null = 取消；'' = 未分组；其他 = 分组名
+  Future<String?> _pickGroupDialog({String? initialGroup}) async {
+    final repo = ref.read(bookRepositoryProvider);
+    final groups = await repo.listGroups();
+    if (!mounted) return null;
+    return showDialog<String>(
+      context: context,
+      builder: (context) => GroupPickerDialog(
+        groups: groups,
+        initialGroup: initialGroup ?? '',
       ),
     );
   }
@@ -466,34 +738,87 @@ class CoverView extends StatelessWidget {
   }
 }
 
-class _BookCard extends ConsumerWidget {
-  const _BookCard({required this.book, required this.spec});
+/// 选中态角标
+class _SelectionBadge extends StatelessWidget {
+  const _SelectionBadge({required this.selected, required this.color});
+
+  final bool selected;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(2),
+      decoration: BoxDecoration(
+        color: selected ? color : Colors.black45,
+        shape: BoxShape.circle,
+      ),
+      child: Icon(
+        selected ? Icons.check : Icons.circle_outlined,
+        size: 16,
+        color: Colors.white,
+      ),
+    );
+  }
+}
+
+class _BookCard extends StatelessWidget {
+  const _BookCard({
+    required this.book,
+    required this.spec,
+    required this.selectionMode,
+    required this.selected,
+    required this.onTap,
+    required this.onLongPress,
+  });
 
   final Book book;
   final ReaderThemeSpec spec;
+  final bool selectionMode;
+  final bool selected;
+  final VoidCallback onTap;
+  final VoidCallback onLongPress;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     return GestureDetector(
-      onTap: () => context.push('/reader/${book.id}'),
-      onLongPress: () => showBookActions(context, ref, book),
+      onTap: onTap,
+      onLongPress: onLongPress,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Expanded(
-            child: Container(
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(10),
-                boxShadow: [
-                  BoxShadow(
-                    color: cs.shadow.withValues(alpha: 0.18),
-                    blurRadius: 10,
-                    offset: const Offset(0, 4),
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: Container(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(10),
+                      border: selectionMode && selected
+                          ? Border.all(color: cs.primary, width: 2.5)
+                          : null,
+                      boxShadow: [
+                        BoxShadow(
+                          color: cs.shadow.withValues(alpha: 0.18),
+                          blurRadius: 10,
+                          offset: const Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    child: CoverView(book: book, spec: spec),
                   ),
-                ],
-              ),
-              child: CoverView(book: book, spec: spec),
+                ),
+                if (selectionMode)
+                  Positioned(
+                    top: 4,
+                    right: 4,
+                    child: _SelectionBadge(
+                      selected: selected,
+                      color: cs.primary,
+                    ),
+                  ),
+              ],
             ),
           ),
           const SizedBox(height: 8),
@@ -510,45 +835,77 @@ class _BookCard extends ConsumerWidget {
   }
 }
 
-class _BookTile extends ConsumerWidget {
-  const _BookTile({required this.book, required this.spec});
+class _BookTile extends StatelessWidget {
+  const _BookTile({
+    required this.book,
+    required this.spec,
+    required this.selectionMode,
+    required this.selected,
+    required this.onTap,
+    required this.onLongPress,
+  });
 
   final Book book;
   final ReaderThemeSpec spec;
+  final bool selectionMode;
+  final bool selected;
+  final VoidCallback onTap;
+  final VoidCallback onLongPress;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     return Card(
       elevation: 0,
-      color: cs.surfaceContainerHighest.withValues(alpha: 0.4),
+      color: selected
+          ? cs.primaryContainer.withValues(alpha: 0.5)
+          : cs.surfaceContainerHighest.withValues(alpha: 0.4),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       child: ListTile(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        leading: SizedBox(
-          width: 44,
-          height: 60,
-          child: CoverView(book: book, spec: spec),
+        leading: Stack(
+          children: [
+            SizedBox(
+              width: 44,
+              height: 60,
+              child: CoverView(book: book, spec: spec),
+            ),
+            if (selectionMode)
+              Positioned(
+                top: 0,
+                right: 0,
+                child: _SelectionBadge(selected: selected, color: cs.primary),
+              ),
+          ],
         ),
         title: Text(book.title, maxLines: 1, overflow: TextOverflow.ellipsis),
         subtitle: Text(
-          '${book.author ?? '佚名'} · ${book.format}',
+          '${book.author ?? '佚名'} · ${book.format}'
+          '${(book.groupName?.isNotEmpty ?? false) ? ' · ${book.groupName}' : ''}',
           maxLines: 1,
           style: TextStyle(color: cs.outline, fontSize: 12),
         ),
-        trailing: IconButton(
-          icon: const Icon(Icons.more_vert),
-          onPressed: () => showBookActions(context, ref, book),
-        ),
-        onTap: () => context.push('/reader/${book.id}'),
+        trailing: selectionMode
+            ? null
+            : IconButton(
+                icon: const Icon(Icons.more_vert),
+                onPressed: onLongPress,
+              ),
+        onTap: onTap,
+        onLongPress: onLongPress,
       ),
     );
   }
 }
 
 /// 书籍操作菜单（长按封面 / 列表右侧按钮）
-void showBookActions(BuildContext context, WidgetRef ref, Book book) {
+void showBookActions(
+  BuildContext context,
+  WidgetRef ref,
+  Book book, {
+  VoidCallback? onMultiSelect,
+}) {
   showModalBottomSheet<void>(
     context: context,
     builder: (context) => SafeArea(
@@ -564,12 +921,69 @@ void showBookActions(BuildContext context, WidgetRef ref, Book book) {
             },
           ),
           ListTile(
-            leading: const Icon(Icons.delete_outline),
-            title: const Text('删除书籍'),
+            leading: const Icon(Icons.drive_file_move_outline),
+            title: const Text('移动到分组'),
             onTap: () async {
               Navigator.pop(context);
               final repo = ref.read(bookRepositoryProvider);
-              await repo.deleteBook(book.id, deleteManagedFile: true);
+              final groups = await repo.listGroups();
+              if (!context.mounted) return;
+              final result = await showDialog<String>(
+                context: context,
+                builder: (context) => GroupPickerDialog(
+                  groups: groups,
+                  initialGroup: book.groupName ?? '',
+                ),
+              );
+              if (result == null) return;
+              await repo.setGroup(book.id, result);
+            },
+          ),
+          if (onMultiSelect != null)
+            ListTile(
+              leading: const Icon(Icons.checklist),
+              title: const Text('批量管理'),
+              onTap: () {
+                Navigator.pop(context);
+                onMultiSelect();
+              },
+            ),
+          ListTile(
+            leading: Icon(
+              Icons.delete_outline,
+              color: Theme.of(context).colorScheme.error,
+            ),
+            title: Text(
+              '删除书籍',
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+            onTap: () async {
+              Navigator.pop(context);
+              final confirmed = await showDialog<bool>(
+                context: context,
+                builder: (context) => AlertDialog(
+                  title: const Text('删除书籍'),
+                  content: Text('确定删除《${book.title}》？\n书籍文件、阅读进度与批注将一并删除。'),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(context, false),
+                      child: const Text('取消'),
+                    ),
+                    FilledButton(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Theme.of(context).colorScheme.error,
+                      ),
+                      onPressed: () => Navigator.pop(context, true),
+                      child: const Text('删除'),
+                    ),
+                  ],
+                ),
+              );
+              if (confirmed == true) {
+                await ref
+                    .read(bookRepositoryProvider)
+                    .deleteBook(book.id, deleteManagedFile: true);
+              }
             },
           ),
         ],
@@ -578,7 +992,7 @@ void showBookActions(BuildContext context, WidgetRef ref, Book book) {
   );
 }
 
-/// 书籍详情弹窗：元数据 + 阅读进度
+/// 书籍详情页：醒目的半屏弹层（封面 + 元数据 + 简介）
 Future<void> showBookDetails(
   BuildContext context,
   WidgetRef ref,
@@ -595,72 +1009,321 @@ Future<void> showBookDetails(
 
   if (!context.mounted) return;
 
-  Widget row(String label, String value) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 4),
-    child: Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        SizedBox(
-          width: 72,
-          child: Text(label, style: const TextStyle(fontSize: 13)),
-        ),
-        Expanded(
-          child: Text(
-            value,
-            style: const TextStyle(fontSize: 13),
-            textAlign: TextAlign.end,
-          ),
-        ),
-      ],
-    ),
+  final cs = Theme.of(context).colorScheme;
+  // 封面用当前明暗状态对应的阅读主题（书架卡片同源）
+  final spec = ref.read(themeControllerProvider).resolve(
+    MediaQuery.platformBrightnessOf(context) == Brightness.dark,
   );
-
   final chapters = meta['chapterCount'];
   final chars = meta['charCount'];
   final pages = meta['pageCount'];
+  final description = meta['description'] as String?;
   final added = DateTime.fromMillisecondsSinceEpoch(book.addedAt);
+  final dateStr =
+      '${added.year}-${added.month.toString().padLeft(2, '0')}-${added.day.toString().padLeft(2, '0')}';
 
-  showDialog<void>(
+  Widget stat(String label, String value) => Column(
+    mainAxisSize: MainAxisSize.min,
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(
+        value,
+        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+      ),
+      const SizedBox(height: 2),
+      Text(
+        label,
+        style: TextStyle(fontSize: 11, color: cs.outline),
+      ),
+    ],
+  );
+
+  await showModalBottomSheet<void>(
     context: context,
-    builder: (context) => AlertDialog(
-      title: Text(book.title, style: const TextStyle(fontSize: 18)),
-      content: Column(
+    isScrollControlled: true,
+    showDragHandle: true,
+    builder: (context) {
+      return DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.72,
+        maxChildSize: 0.92,
+        minChildSize: 0.5,
+        builder: (context, scrollController) => Column(
+          children: [
+            Expanded(
+              child: ListView(
+                controller: scrollController,
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+                children: [
+                  // 头部：封面 + 基本信息块
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SizedBox(
+                        width: 110,
+                        height: 154,
+                        child: CoverView(book: book, spec: spec),
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              book.title,
+                              style: const TextStyle(
+                                fontSize: 19,
+                                fontWeight: FontWeight.w700,
+                                height: 1.3,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              book.author ?? '佚名',
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: cs.outline,
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            Wrap(
+                              spacing: 6,
+                              runSpacing: 6,
+                              children: [
+                                _MetaChip(label: book.format),
+                                if (book.groupName?.isNotEmpty ?? false)
+                                  _MetaChip(
+                                    label: book.groupName!,
+                                    icon: Icons.folder_outlined,
+                                  ),
+                                if (book.language?.isNotEmpty ?? false)
+                                  _MetaChip(label: book.language!),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+                  // 统计条
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 14,
+                    ),
+                    decoration: BoxDecoration(
+                      color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        stat(
+                          '进度',
+                          percent == null
+                              ? '未开始'
+                              : '${(percent * 100).toStringAsFixed(1)}%',
+                        ),
+                        if (book.fileSize != null)
+                          stat('大小', formatBytes(book.fileSize!)),
+                        if (pages != null)
+                          stat('页数', '$pages')
+                        else if (chapters != null)
+                          stat('章节', '$chapters'),
+                        if (chars != null && (chars as int) > 0)
+                          stat('字数', chars >= 10000
+                              ? '${(chars / 10000).toStringAsFixed(1)}万'
+                              : '$chars'),
+                        stat('导入', dateStr),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  // 简介
+                  Text(
+                    '简介',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: cs.primary,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    (description == null || description.trim().isEmpty)
+                        ? '（该书籍未提供简介信息）'
+                        : description.trim(),
+                    style: TextStyle(
+                      fontSize: 13.5,
+                      height: 1.7,
+                      color: cs.onSurface.withValues(alpha: 0.85),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            // 底部操作
+            SafeArea(
+              top: false,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () => Navigator.pop(context),
+                        icon: const Icon(Icons.close, size: 18),
+                        label: const Text('关闭'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      flex: 2,
+                      child: FilledButton.icon(
+                        onPressed: () {
+                          Navigator.pop(context);
+                          context.push('/reader/${book.id}');
+                        },
+                        icon: const Icon(Icons.menu_book_outlined, size: 18),
+                        label: const Text('继续阅读'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    },
+  );
+}
+
+/// 详情页元信息小标签
+class _MetaChip extends StatelessWidget {
+  const _MetaChip({required this.label, this.icon});
+
+  final String label;
+  final IconData? icon;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: cs.primary.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          row('作者', book.author ?? '佚名'),
-          row('格式', book.format),
-          if (book.fileSize != null) row('大小', formatBytes(book.fileSize!)),
-          if (pages != null)
-            row('页数', '$pages 页')
-          else if (chapters != null)
-            row('章节', '$chapters 章'),
-          if (chars != null && (chars as int) > 0) row('字数', '$chars 字'),
-          row(
-            '进度',
-            percent == null ? '未开始' : '${(percent * 100).toStringAsFixed(1)}%',
-          ),
-          row(
-            '导入时间',
-            '${added.year}-${added.month.toString().padLeft(2, '0')}-${added.day.toString().padLeft(2, '0')}',
+          if (icon != null) ...[
+            Icon(icon, size: 12, color: cs.primary),
+            const SizedBox(width: 3),
+          ],
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 11,
+              color: cs.primary,
+              fontWeight: FontWeight.w500,
+            ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 分组选择对话框：返回 null = 取消；'' = 未分组；其他 = 分组名（可新建）
+class GroupPickerDialog extends StatefulWidget {
+  const GroupPickerDialog({super.key, required this.groups, this.initialGroup = ''});
+
+  final List<String> groups;
+  final String initialGroup;
+
+  @override
+  State<GroupPickerDialog> createState() => _GroupPickerDialogState();
+}
+
+class _GroupPickerDialogState extends State<GroupPickerDialog> {
+  late String _selected = widget.initialGroup;
+  final _newGroupCtl = TextEditingController();
+
+  @override
+  void dispose() {
+    _newGroupCtl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('移动到分组'),
+      content: SizedBox(
+        width: 320,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(
+              child: SingleChildScrollView(
+                child: Column(
+                  children: [
+                    for (final g in ['', ...widget.groups])
+                      ListTile(
+                        dense: true,
+                        leading: Icon(
+                          g.isEmpty
+                              ? Icons.folder_off_outlined
+                              : Icons.folder_outlined,
+                          size: 20,
+                          color: _selected == g
+                              ? Theme.of(context).colorScheme.primary
+                              : Theme.of(context).colorScheme.outline,
+                        ),
+                        title: Text(g.isEmpty ? '（未分组）' : g, style: const TextStyle(fontSize: 14)),
+                        trailing: _selected == g
+                            ? Icon(
+                                Icons.check,
+                                size: 18,
+                                color: Theme.of(context).colorScheme.primary,
+                              )
+                            : null,
+                        onTap: () => setState(() => _selected = g),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _newGroupCtl,
+              decoration: const InputDecoration(
+                labelText: '新建分组',
+                hintText: '输入名称，确定时优先使用',
+                isDense: true,
+              ),
+            ),
+          ],
+        ),
       ),
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(context),
-          child: const Text('关闭'),
+          child: const Text('取消'),
         ),
         FilledButton(
           onPressed: () {
-            Navigator.pop(context);
-            context.push('/reader/${book.id}');
+            final name = _newGroupCtl.text.trim();
+            Navigator.pop(context, name.isNotEmpty ? name : _selected);
           },
-          child: const Text('继续阅读'),
+          child: const Text('确定'),
         ),
       ],
-    ),
-  );
+    );
+  }
 }
 
 /// 字节数人类可读化

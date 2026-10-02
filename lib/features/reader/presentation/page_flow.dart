@@ -1,11 +1,27 @@
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../../core/theme/reader_theme.dart';
 import '../../../engine/ir/book_document.dart';
 import '../../../engine/pagination/text_paginator.dart';
+import '../data/highlight_repository.dart';
+
+/// 页内批注区间（章内扁平文本坐标，供 PageCanvas 绘制）
+class PageMark {
+  const PageMark({
+    required this.start,
+    required this.end,
+    required this.colorIndex,
+    required this.styleIndex,
+  });
+
+  final int start;
+  final int end;
+  final int colorIndex;
+  final int styleIndex;
+}
 
 /// 单页画布：用分页时烘焙的 TextPainter 逐行绘制，保证测量/绘制像素一致。
 class PageCanvas extends StatelessWidget {
@@ -16,6 +32,8 @@ class PageCanvas extends StatelessWidget {
     required this.theme,
     required this.margins,
     this.resources,
+    this.marks = const [],
+    this.selection,
   });
 
   final LaidOutChapter laid;
@@ -23,6 +41,12 @@ class PageCanvas extends StatelessWidget {
   final ReaderThemeSpec theme;
   final EdgeInsets margins;
   final ResourceStore? resources;
+
+  /// 已保存的批注（章内字符区间）
+  final List<PageMark> marks;
+
+  /// 进行中的划词选择（章内字符区间，有序）
+  final (int, int)? selection;
 
   @override
   Widget build(BuildContext context) {
@@ -33,6 +57,12 @@ class PageCanvas extends StatelessWidget {
         theme: theme,
         margins: margins,
         resources: resources,
+        marks: marks,
+        selection: selection,
+        // 关键修复：异步图片加载完成不会改变 page/laid 对象，
+        // shouldRepaint 恒为 false 导致除首章外的图片永远停留在占位框。
+        // 挂上 imageLoadedTick，任何图片解码完成即触发本页重绘。
+        repaint: imageLoadedTick,
       ),
       size: Size.infinite,
     );
@@ -43,6 +73,84 @@ class PageCanvas extends StatelessWidget {
   static void clearImageCaches() {
     _PagePainter.imageCache.clear();
     _PagePainter.imageLoading.clear();
+  }
+
+  /// 局部坐标 → 章内扁平文本字符偏移；未命中文本返回 null。
+  /// 批注长按划词的命中实现（CustomPaint 无 TextField，需自行换算）。
+  static int? hitTestChar(
+    LaidOutChapter laid,
+    PageBox page,
+    EdgeInsets margins,
+    Offset local,
+  ) {
+    var y = margins.top;
+    for (final unit in page.units) {
+      final lb = laid.blocks[unit.blockIndex];
+      final spaceAbove = identical(unit, page.units.first)
+          ? 0.0
+          : lb.spaceAbove;
+      final visibleH = lb.lineHeights
+          .skip(unit.firstLine)
+          .take(unit.lineCount)
+          .fold(0.0, (a, b) => a + b);
+      y += spaceAbove;
+      if (lb.isImage || lb.block.type == BlockType.hr) {
+        y += visibleH;
+        continue;
+      }
+      if (local.dy >= y && local.dy < y + visibleH) {
+        final quoteIndent = lb.quoteDepth * 18.0;
+        // painter 原点在画布上的位置（partial 单位 painter 平移到行顶）
+        final originDy = y - lb.lineTops[unit.firstLine];
+        final pos = lb.painter.getPositionForOffset(
+          Offset(local.dx - margins.left - quoteIndent, local.dy - originDy),
+        );
+        // painter 坐标 → 章内坐标：剔除前缀（缩进/列表标号），限幅到块内
+        final inBlock = (pos.offset - lb.prefixChars).clamp(
+          0,
+          lb.block.plainText.length,
+        );
+        return lb.charBase + inBlock;
+      }
+      y += visibleH;
+    }
+    return null;
+  }
+
+  /// 局部坐标 → 命中的图片资源 src（长按查看大图用）；未命中返回 null。
+  /// 判定逻辑与 _PagePainter._paintImage 的布局保持一致。
+  static String? hitTestImage(
+    LaidOutChapter laid,
+    PageBox page,
+    EdgeInsets margins,
+    Offset local,
+  ) {
+    final cfg = laid.config;
+    var y = margins.top;
+    for (final unit in page.units) {
+      final lb = laid.blocks[unit.blockIndex];
+      final spaceAbove = identical(unit, page.units.first)
+          ? 0.0
+          : lb.spaceAbove;
+      final visibleH = lb.lineHeights
+          .skip(unit.firstLine)
+          .take(unit.lineCount)
+          .fold(0.0, (a, b) => a + b);
+      y += spaceAbove;
+      if (lb.isImage) {
+        final rect = Rect.fromLTWH(
+          margins.left,
+          y,
+          cfg.contentWidth,
+          visibleH,
+        );
+        if (rect.contains(local)) {
+          return lb.block.imageSrc;
+        }
+      }
+      y += visibleH;
+    }
+    return null;
   }
 }
 
@@ -56,6 +164,9 @@ class _PagePainter extends CustomPainter {
     required this.theme,
     required this.margins,
     this.resources,
+    this.marks = const [],
+    this.selection,
+    super.repaint,
   });
 
   final LaidOutChapter laid;
@@ -63,6 +174,8 @@ class _PagePainter extends CustomPainter {
   final ReaderThemeSpec theme;
   final EdgeInsets margins;
   final ResourceStore? resources;
+  final List<PageMark> marks;
+  final (int, int)? selection;
 
   static final imageCache = <String, ui.Image>{};
   static final imageLoading = <String>{};
@@ -124,6 +237,12 @@ class _PagePainter extends CustomPainter {
       final quoteIndent = lb.quoteDepth * 18.0;
       final fullBlock =
           unit.firstLine == 0 && unit.lineCount == lb.lineHeights.length;
+      // painter 原点在画布上的位置：整块时 lineTops[0]==0，partial 时平移到首行
+      final painterOrigin = Offset(
+        x0 + quoteIndent,
+        y - lb.lineTops[unit.firstLine],
+      );
+      final ranges = _rangesForBlock(lb);
 
       canvas.save();
       canvas.clipRect(
@@ -134,8 +253,10 @@ class _PagePainter extends CustomPainter {
           visibleH,
         ),
       );
+      // 第一遍：背景高亮（样式 0）与选区 —— 垫在文字下方
+      _paintRanges(canvas, lb, painterOrigin, ranges, underlinePass: false);
       if (fullBlock) {
-        lb.painter.paint(canvas, Offset(x0 + quoteIndent, y));
+        lb.painter.paint(canvas, painterOrigin);
       } else {
         final top = lb.lineTops[unit.firstLine];
         canvas.save();
@@ -151,9 +272,106 @@ class _PagePainter extends CustomPainter {
         lb.painter.paint(canvas, Offset.zero);
         canvas.restore();
       }
+      // 第二遍：下划线（样式 1/2）—— 压在文字上方
+      _paintRanges(canvas, lb, painterOrigin, ranges, underlinePass: true);
       canvas.restore();
 
       y += visibleH;
+    }
+  }
+
+  /// 计算本块需要绘制的批注/选区区间（换算为 TextPainter 坐标）
+  List<(int, int, ui.Color, int)> _rangesForBlock(LaidOutBlock lb) {
+    final blockEnd = lb.charBase + lb.block.plainText.length;
+    final pTextLen = lb.prefixChars + lb.block.plainText.length;
+    final ranges = <(int, int, ui.Color, int)>[];
+
+    void add(int start, int end, ui.Color color, int styleIndex) {
+      final ps = ((start - lb.charBase) + lb.prefixChars).clamp(0, pTextLen);
+      final pe = ((end - lb.charBase) + lb.prefixChars).clamp(0, pTextLen);
+      if (ps >= pe) return;
+      ranges.add((ps, pe, color, styleIndex));
+    }
+
+    for (final m in marks) {
+      if (m.end <= lb.charBase || m.start >= blockEnd) continue;
+      add(
+        m.start,
+        m.end,
+        highlightPalette[m.colorIndex.clamp(0, highlightPalette.length - 1)],
+        m.styleIndex.clamp(0, 2),
+      );
+    }
+    final sel = selection;
+    if (sel != null && sel.$2 > lb.charBase && sel.$1 < blockEnd) {
+      add(sel.$1, sel.$2, theme.accent, 0);
+    }
+    return ranges;
+  }
+
+  /// 绘制一个块内的高亮区间。[underlinePass]=false 画背景填充，true 画下划线。
+  void _paintRanges(
+    Canvas canvas,
+    LaidOutBlock lb,
+    Offset painterOrigin,
+    List<(int, int, ui.Color, int)> ranges, {
+    required bool underlinePass,
+  }) {
+    for (final (pStart, pEnd, color, styleIndex) in ranges) {
+      final isUnderline = styleIndex != 0;
+      if (isUnderline != underlinePass) continue;
+      final boxes = lb.painter.getBoxesForSelection(
+        TextSelection(baseOffset: pStart, extentOffset: pEnd),
+        boxHeightStyle: ui.BoxHeightStyle.tight,
+      );
+      for (final box in boxes) {
+        final r = Rect.fromLTRB(
+          painterOrigin.dx + box.left,
+          painterOrigin.dy + box.top,
+          painterOrigin.dx + box.right,
+          painterOrigin.dy + box.bottom,
+        );
+        if (styleIndex == 0) {
+          canvas.drawRect(r, Paint()..color = color.withValues(alpha: 0.35));
+        } else if (styleIndex == 1) {
+          // 直线下划线
+          canvas.drawLine(
+            Offset(r.left, r.bottom - 1.5),
+            Offset(r.right, r.bottom - 1.5),
+            Paint()
+              ..color = color
+              ..strokeWidth = 1.5
+              ..strokeCap = StrokeCap.round,
+          );
+        } else {
+          // 波浪下划线
+          final path = Path();
+          final yWave = r.bottom - 1.5;
+          const amp = 1.5;
+          const wl = 5.0;
+          var x = r.left;
+          var up = true;
+          path.moveTo(x, yWave);
+          while (x < r.right) {
+            final nx = (x + wl).clamp(r.left, r.right).toDouble();
+            path.quadraticBezierTo(
+              (x + nx) / 2,
+              up ? yWave - amp : yWave + amp,
+              nx,
+              yWave,
+            );
+            up = !up;
+            x = nx;
+          }
+          canvas.drawPath(
+            path,
+            Paint()
+              ..color = color
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 1.2,
+          );
+        }
+      }
     }
   }
 
@@ -231,7 +449,11 @@ class _PagePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _PagePainter old) =>
-      old.page != page || old.theme != theme || old.laid != laid;
+      old.page != page ||
+      old.theme != theme ||
+      old.laid != laid ||
+      old.selection != selection ||
+      !listEquals(old.marks, marks);
 }
 
 /// 翻页动画类型
@@ -255,6 +477,10 @@ class PageFlow extends StatefulWidget {
     this.duration = const Duration(milliseconds: 180),
     this.onTapCenter,
     this.enabled = true,
+    this.onLongPressStart,
+    this.onLongPressMoveUpdate,
+    this.onLongPressEnd,
+    this.selecting = false,
   });
 
   /// 构建当前阅读状态的页面 Widget（快照式：翻页前先取旧页）
@@ -263,8 +489,18 @@ class PageFlow extends StatefulWidget {
   final Future<bool> Function() onPrev;
   final PageTurnType animType;
   final Duration duration;
-  final VoidCallback? onTapCenter;
+
+  /// 中部点按回调（携带局部坐标，用于批注命中）
+  final void Function(Offset localPosition)? onTapCenter;
   final bool enabled;
+
+  /// 长按手势透传（批注：长按划词选择）。为 null 时不注册长按手势。
+  final GestureLongPressStartCallback? onLongPressStart;
+  final GestureLongPressMoveUpdateCallback? onLongPressMoveUpdate;
+  final GestureLongPressEndCallback? onLongPressEnd;
+
+  /// 是否正在选择文本（选择期间 tap 不触发翻页/菜单）
+  final bool selecting;
 
   @override
   State<PageFlow> createState() => _PageFlowState();
@@ -309,6 +545,8 @@ class _PageFlowState extends State<PageFlow>
 
   void _handleTapUp(TapUpDetails d) {
     if (!widget.enabled || _ctrl.isAnimating || _dragging) return;
+    // 选择批注期间：点按仅用于清除选择，不翻页/不弹菜单
+    if (widget.selecting) return;
     final w = context.size?.width ?? 1;
     final x = d.localPosition.dx;
     if (x < w * 0.3) {
@@ -316,7 +554,7 @@ class _PageFlowState extends State<PageFlow>
     } else if (x > w * 0.7) {
       _turn(widget.onNext, 1);
     } else {
-      widget.onTapCenter?.call();
+      widget.onTapCenter?.call(d.localPosition);
     }
   }
 
@@ -387,6 +625,10 @@ class _PageFlowState extends State<PageFlow>
       onHorizontalDragStart: _onDragStart,
       onHorizontalDragUpdate: _onDragUpdate,
       onHorizontalDragEnd: _onDragEnd,
+      // 长按透传（批注选择）；桌面端鼠标长按同样触发
+      onLongPressStart: widget.onLongPressStart,
+      onLongPressMoveUpdate: widget.onLongPressMoveUpdate,
+      onLongPressEnd: widget.onLongPressEnd,
       child: AnimatedBuilder(
         animation: _ctrl,
         builder: (context, _) => LayoutBuilder(
@@ -397,17 +639,19 @@ class _PageFlowState extends State<PageFlow>
             final t = _dragging ? _dragT : (hasOutgoing ? _ctrl.value : 0.0);
             final dir = _direction;
             if (!hasOutgoing && t == 0) {
-              return widget.buildPage();
+              return RepaintBoundary(child: widget.buildPage());
             }
             if (!hasOutgoing && _dragging) {
-              // 拖拽反馈：当前页跟手平移（peek），邻页未排版时无对接页
+              // 拖拽反馈：当前页跟手平移（peek），邻页未排版时无对接页。
+              // RepaintBoundary 放在 Transform 内层：平移只改图层偏移，
+              // 不触发整页重绘（修复桌面端长按拖动的卡顿）。
               return Transform.translate(
                 offset: Offset(-dir * t * width * 0.25, 0),
-                child: widget.buildPage(),
+                child: RepaintBoundary(child: widget.buildPage()),
               );
             }
             return _StackPages(
-              current: widget.buildPage(),
+              current: RepaintBoundary(child: widget.buildPage()),
               outgoing: _outgoing,
               t: t,
               dir: dir,
@@ -449,13 +693,13 @@ class _StackPages extends StatelessWidget {
             Positioned.fill(
               child: Transform.translate(
                 offset: Offset(-dir * t * width, 0),
-                child: old,
+                child: RepaintBoundary(child: old),
               ),
             ),
             Positioned.fill(
               child: Transform.translate(
                 offset: Offset(dir * (1 - t) * width, 0),
-                child: current,
+                child: RepaintBoundary(child: current),
               ),
             ),
           ],
@@ -463,11 +707,11 @@ class _StackPages extends StatelessWidget {
       case PageTurnType.cover:
         return Stack(
           children: [
-            Positioned.fill(child: old),
+            Positioned.fill(child: RepaintBoundary(child: old)),
             Positioned.fill(
               child: Transform.translate(
                 offset: Offset(dir * (1 - t) * width, 0),
-                child: current,
+                child: RepaintBoundary(child: current),
               ),
             ),
           ],

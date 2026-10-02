@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../../app/theme_controller.dart';
 import '../../../core/theme/reader_theme.dart';
@@ -113,22 +114,30 @@ class SettingsPage extends ConsumerWidget {
                   .update((s) => s.copyWith(justify: v)),
             ),
           ),
+          const _SectionHeader('阅读体验'),
+          ListTile(
+            leading: const Icon(Icons.grain),
+            title: const Text('墨水屏模式'),
+            subtitle: const Text('去除所有动画与过渡效果，适合电子墨水屏设备'),
+            trailing: Switch(
+              value: settings.inkMode,
+              onChanged: (v) => ref
+                  .read(readerSettingsProvider.notifier)
+                  .update((s) => s.copyWith(inkMode: v)),
+            ),
+          ),
           const _SectionHeader('数据'),
           ListTile(
             leading: const Icon(Icons.backup_outlined),
             title: const Text('备份与恢复'),
-            subtitle: const Text('v1.x 提供（计划书 FR-F03）'),
-            onTap: () {
-              ScaffoldMessenger.of(
-                context,
-              ).showSnackBar(const SnackBar(content: Text('备份功能将于 v1.x 提供')));
-            },
+            subtitle: const Text('本地文件夹 / WebDAV / S3 / 局域网同步'),
+            onTap: () => context.push('/backup'),
           ),
           const _SectionHeader('关于'),
           const ListTile(
             leading: Icon(Icons.local_library_outlined),
-            title: Text('轻阅 LiteRead'),
-            subtitle: Text('v0.2.0 · 本地优先 · 无广告无追踪'),
+            title: Text('LiteRead'),
+            subtitle: Text('v1.0.0 · 本地优先 · 无广告无追踪'),
           ),
           ListTile(
             leading: const Icon(Icons.info_outline),

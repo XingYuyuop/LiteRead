@@ -23,6 +23,9 @@ class Books extends Table {
   IntColumn get lastReadAt => integer().nullable()();
   TextColumn get metaJson => text().nullable()();
 
+  /// 书架分组名（null = 未分组）
+  TextColumn get groupName => text().nullable()();
+
   @override
   Set<Column> get primaryKey => {id};
 }
@@ -46,6 +49,10 @@ class Highlights extends Table {
   TextColumn get locatorJson => text()();
   TextColumn get selectedText => text()();
   IntColumn get colorIndex => integer()();
+
+  /// 划线线型：0=背景高亮 1=直线下划线 2=波浪下划线（v2 新增）
+  IntColumn get styleIndex => integer().withDefault(const Constant(0))();
+
   TextColumn get note => text().nullable()();
   IntColumn get createdAt => integer()();
   IntColumn get updatedAt => integer()();
@@ -93,7 +100,21 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase({QueryExecutor? executor}) : super(executor ?? _open());
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 3;
+
+  @override
+  MigrationStrategy get migration => MigrationStrategy(
+    onUpgrade: (m, from, to) async {
+      // v2：Highlights 增加划线线型列
+      if (from < 2) {
+        await m.addColumn(highlights, highlights.styleIndex);
+      }
+      // v3：Books 增加书架分组列
+      if (from < 3) {
+        await m.addColumn(books, books.groupName);
+      }
+    },
+  );
 
   static QueryExecutor _open() {
     return driftDatabase(

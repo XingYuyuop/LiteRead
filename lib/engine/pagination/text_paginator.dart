@@ -61,6 +61,8 @@ class LaidOutBlock {
     required this.indentWidth,
     required this.quoteDepth,
     required this.isImage,
+    this.charBase = 0,
+    this.prefixChars = 0,
   });
 
   final int blockIndex;
@@ -84,6 +86,12 @@ class LaidOutBlock {
 
   /// 图片块
   final bool isImage;
+
+  /// 块首在章扁平文本中的偏移（批注坐标映射用）
+  final int charBase;
+
+  /// 文本前缀字符数（缩进全角空格/列表标号），批注坐标 ↔ TextPainter 偏移换算
+  final int prefixChars;
 
   /// 图片显示高度（仅图片块）
   final double imageHeight = 0;
@@ -183,9 +191,11 @@ class TextPaginator {
     final cfg = styles.config;
     final blocks = <LaidOutBlock>[];
 
+    var charBase = 0;
     for (var bi = 0; bi < chapter.blocks.length; bi++) {
       final block = chapter.blocks[bi];
-      blocks.add(_measureBlock(block, bi, styles, imageAspects));
+      blocks.add(_measureBlock(block, bi, styles, imageAspects, charBase));
+      charBase += block.plainText.length + 1;
       // 分块让出事件循环，避免超长章卡 UI（M1 在主 isolate 分页）
       if (bi % 64 == 63) {
         await Future<void>.delayed(Duration.zero);
@@ -296,6 +306,7 @@ class TextPaginator {
     int blockIndex,
     LayoutStyleSet styles,
     Map<String, double> imageAspects,
+    int charBase,
   ) {
     final cfg = styles.config;
 
@@ -451,6 +462,8 @@ class TextPaginator {
       indentWidth: indentWidth,
       quoteDepth: block.quoteDepth,
       isImage: false,
+      charBase: charBase,
+      prefixChars: prefix.length,
     );
   }
 

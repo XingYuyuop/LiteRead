@@ -7,6 +7,9 @@ import '../../../app/theme_controller.dart';
 
 /// 阅读排版与行为设置（计划书 §3.6 / 附录 A）。
 /// Locator 与排版无关，因此修改任何字段都不会使进度漂移。
+/// 角落显示项：0无 1时间 2电量 3进度 4页码 5书名 6章节名
+const cornerOptionLabels = ['无', '时间', '电量', '进度', '页码', '书名', '章节名'];
+
 class ReaderSettings {
   const ReaderSettings({
     this.fontSize = 18,
@@ -24,6 +27,11 @@ class ReaderSettings {
     this.pageAnim = 'cover',
     this.showStatusBar = true,
     this.keepScreenOn = true,
+    this.inkMode = false,
+    this.cornerTopLeft = 6,
+    this.cornerTopRight = 0,
+    this.cornerBottomLeft = 4,
+    this.cornerBottomRight = 3,
   });
 
   final double fontSize; // 12–36
@@ -45,6 +53,15 @@ class ReaderSettings {
   final bool showStatusBar;
   final bool keepScreenOn;
 
+  /// 墨水屏模式：去除所有动画（翻页/菜单过渡等），适配墨水屏设备
+  final bool inkMode;
+
+  /// 阅读界面四角显示内容（索引见 cornerOptionLabels）
+  final int cornerTopLeft;
+  final int cornerTopRight;
+  final int cornerBottomLeft;
+  final int cornerBottomRight;
+
   EdgeInsets get margins =>
       EdgeInsets.fromLTRB(marginLeft, marginTop, marginRight, marginBottom);
 
@@ -65,6 +82,11 @@ class ReaderSettings {
     String? pageAnim,
     bool? showStatusBar,
     bool? keepScreenOn,
+    bool? inkMode,
+    int? cornerTopLeft,
+    int? cornerTopRight,
+    int? cornerBottomLeft,
+    int? cornerBottomRight,
   }) {
     return ReaderSettings(
       fontSize: fontSize ?? this.fontSize,
@@ -82,6 +104,11 @@ class ReaderSettings {
       pageAnim: pageAnim ?? this.pageAnim,
       showStatusBar: showStatusBar ?? this.showStatusBar,
       keepScreenOn: keepScreenOn ?? this.keepScreenOn,
+      inkMode: inkMode ?? this.inkMode,
+      cornerTopLeft: cornerTopLeft ?? this.cornerTopLeft,
+      cornerTopRight: cornerTopRight ?? this.cornerTopRight,
+      cornerBottomLeft: cornerBottomLeft ?? this.cornerBottomLeft,
+      cornerBottomRight: cornerBottomRight ?? this.cornerBottomRight,
     );
   }
 
@@ -101,6 +128,11 @@ class ReaderSettings {
     'pageAnim': pageAnim,
     'showStatusBar': showStatusBar,
     'keepScreenOn': keepScreenOn,
+    'inkMode': inkMode,
+    'cornerTopLeft': cornerTopLeft,
+    'cornerTopRight': cornerTopRight,
+    'cornerBottomLeft': cornerBottomLeft,
+    'cornerBottomRight': cornerBottomRight,
   };
 
   static ReaderSettings fromJson(Map<String, dynamic> j) => ReaderSettings(
@@ -119,6 +151,11 @@ class ReaderSettings {
     pageAnim: j['pageAnim'] as String? ?? 'cover',
     showStatusBar: j['showStatusBar'] as bool? ?? true,
     keepScreenOn: j['keepScreenOn'] as bool? ?? true,
+    inkMode: j['inkMode'] as bool? ?? false,
+    cornerTopLeft: j['cornerTopLeft'] as int? ?? 6,
+    cornerTopRight: j['cornerTopRight'] as int? ?? 0,
+    cornerBottomLeft: j['cornerBottomLeft'] as int? ?? 4,
+    cornerBottomRight: j['cornerBottomRight'] as int? ?? 3,
   );
 }
 

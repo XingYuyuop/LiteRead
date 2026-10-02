@@ -64,6 +64,7 @@ class EpubParser {
     String? title;
     String? author;
     String? language;
+    String? description;
     String? coverId;
     if (metaEl != null) {
       title =
@@ -75,6 +76,9 @@ class EpubParser {
       language =
           metaEl.findElements('dc:language').firstOrNull?.innerText ??
           metaEl.findElements('language').firstOrNull?.innerText;
+      description =
+          metaEl.findElements('dc:description').firstOrNull?.innerText ??
+          metaEl.findElements('description').firstOrNull?.innerText;
       // EPUB2 cover 声明：<meta name="cover" content="cover-id"/>
       for (final m in metaEl.findElements('meta')) {
         if (m.getAttribute('name') == 'cover') {
@@ -214,6 +218,9 @@ class EpubParser {
           title: (title?.trim().isNotEmpty ?? false) ? title!.trim() : '未命名',
           author: author?.trim(),
           language: language?.trim(),
+          description: (description?.trim().isNotEmpty ?? false)
+              ? description!.trim()
+              : null,
           coverResource: coverResource,
         ),
         spine: chapters,
@@ -243,7 +250,11 @@ class EpubParser {
 
     void walk(dom.Element ol, int depth) {
       for (final li in ol.children.where((e) => e.localName == 'li')) {
-        final a = li.querySelector(':scope > a');
+        // html 包选择器引擎不支持 :scope 伪类（会抛 UnimplementedError），
+        // 改用直接子元素过滤。
+        final a = li.children
+            .where((e) => e.localName == 'a')
+            .firstOrNull;
         if (a != null) {
           final href = a.attributes['href'];
           final idx = _spineIndexOf(href, spineHrefs);
