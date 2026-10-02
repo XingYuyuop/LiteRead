@@ -642,6 +642,7 @@ class LanScanner {
     final out = <LanDevice>[];
     final localIps = await allLocalIPv4s();
     RawDatagramSocket? socket;
+    StreamSubscription<RawSocketEvent>? sub;
     try {
       socket = await RawDatagramSocket.bind(
         InternetAddress.anyIPv4,
@@ -661,11 +662,7 @@ class LanScanner {
         }
       }
       final packet = utf8.encode('LITEREAD_DISCOVER');
-      for (final addr in addrs) {
-        socket.send(packet, InternetAddress(addr), lanSyncPort);
-      }
-      final completer = Completer<void>();
-      final sub = socket.listen((event) {
+      sub = socket.listen((event) {
         if (event != RawSocketEvent.read) return;
         final dg = socket!.receive();
         if (dg == null) return;
@@ -683,6 +680,8 @@ class LanScanner {
                 a as String,
             };
             if (reported.any(localIps.contains)) return;
+            final key = '${dg.address.address}:${j['port'] ?? lanSyncPort}';
+            if (out.any((d) => '${d.address}:${d.port}' == key)) return;
             out.add(
               LanDevice(
                 address: dg.address.address,
@@ -693,14 +692,20 @@ class LanScanner {
           }
         } catch (_) {}
       });
-      await completer.future.timeout(
-        const Duration(milliseconds: 2500),
-        onTimeout: () {},
-      );
-      sub.cancel();
+      // 连发 3 轮广播（约每 700ms 一轮）：首轮包常因 ARP/邻居发现未建立
+      // 或 Wi-Fi 省电被丢弃，多发是 UDP 发现可靠性的关键
+      for (var round = 0; round < 3; round++) {
+        for (final addr in addrs) {
+          socket.send(packet, InternetAddress(addr), lanSyncPort);
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 700));
+      }
+      // 再等 400ms 收尾末轮应答（总时长与原 2.5s 一致）
+      await Future<void>.delayed(const Duration(milliseconds: 400));
     } catch (_) {
       // UDP 广播被防火墙拦截时回退 TCP 扫描
     } finally {
+      unawaited(sub?.cancel());
       socket?.close();
     }
     return out;
@@ -748,18 +753,60 @@ class LanScanner {
     return out;
   }
 
-  /// 探测单台设备：TCP 连上且 /api/ping 返回 literead 才算命中
+  /// 探测单台设备：TCP 连上且 /api/ping 返回 literead 才算命中。
+  /// 服务端固定端口被占用时会向后顺延（最多 +9），因此逐个尝试端口段；
+  /// 47816 完全连不上说明该 IP 没有 LiteRead（服务端总会优先占住它），跳过。
   static Future<LanDevice?> _probe(String ip) async {
+    for (var p = lanSyncPort; p < lanSyncPort + 10; p++) {
+      try {
+        final socket = await Socket.connect(
+          ip,
+          p,
+          timeout: const Duration(milliseconds: 300),
+        );
+        socket.destroy();
+      } catch (_) {
+        if (p == lanSyncPort) return null;
+        continue;
+      }
+      final device = await LanStorePing.ping(ip, p);
+      if (device != null) return device;
+    }
+    return null;
+  }
+
+  /// Windows 防火墙放行本应用（入站允许规则）。
+  /// 扫描不到设备最常见的原因是防火墙拦截了入站连接；此方法通过 UAC
+  /// 提权添加程序级放行规则。返回 null 表示成功，否则为失败原因。
+  static Future<String?> allowThroughWindowsFirewall() async {
+    if (!Platform.isWindows) return '仅 Windows 需要防火墙放行';
+    const ruleName = 'LiteRead Sync';
     try {
-      final socket = await Socket.connect(
-        ip,
-        lanSyncPort,
-        timeout: const Duration(milliseconds: 300),
-      );
-      socket.destroy();
-      return await LanStorePing.ping(ip, lanSyncPort);
-    } catch (_) {
-      return null;
+      final exe = Platform.resolvedExecutable;
+      // powershell 单引号串保留内部双引号，netsh 按程序路径精确放行
+      final ps =
+          'Start-Process -FilePath netsh -Verb RunAs -Wait -ArgumentList '
+          "'advfirewall firewall add rule name=\"$ruleName\" dir=in action=allow program=\"$exe\" enable=yes'";
+      final r = await Process.run('powershell', ['-Command', ps]);
+      if (r.exitCode != 0) {
+        final err = (r.stderr as String?) ?? '';
+        if (err.contains('canceled') || err.contains('取消')) {
+          return '已取消授权（未添加规则）';
+        }
+        return '添加规则失败：$err';
+      }
+      // 验证规则确实存在（UAC 同意但 netsh 失败的情况）
+      final check = await Process.run('netsh', [
+        'advfirewall',
+        'firewall',
+        'show',
+        'rule',
+        'name=$ruleName',
+      ]);
+      final ok = (check.stdout as String).contains(ruleName);
+      return ok ? null : '规则添加未生效，请手动在防火墙设置中放行本应用';
+    } catch (e) {
+      return '执行失败：$e';
     }
   }
 }

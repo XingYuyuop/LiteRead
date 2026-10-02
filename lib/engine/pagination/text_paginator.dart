@@ -257,14 +257,46 @@ class TextPaginator {
         continue;
       }
 
-      // 放不下：先收尾当前页
-      flush();
-      pageStartChar = firstVisibleChar(bi, 0);
+      // 放不下：可切分块（正文段落等）先用前几行填满当前页剩余空间，
+      // 而不是整块下移——否则页尾留白忽多忽少，每页行数不一致。
+      // 孤行控制：切分点两侧各至少保留 2 行，避免页首/页尾出现单行段落。
+      var startLine = 0;
+      if (!isFirstOnPage && _splittableAcrossPage(lb)) {
+        final remaining = cfg.contentHeight - used - spaceAbove;
+        final totalLines = lb.lineHeights.length;
+        var fit = 0;
+        var acc = 0.0;
+        while (fit < totalLines && acc + lb.lineHeights[fit] <= remaining) {
+          acc += lb.lineHeights[fit];
+          fit++;
+        }
+        if (fit >= 2 && totalLines - fit < 2) {
+          // 下一页剩不到 2 行：回退切分点，给下一页留足孤行
+          fit = totalLines - 2;
+          acc = 0;
+          for (var i = 0; i < fit; i++) {
+            acc += lb.lineHeights[i];
+          }
+        }
+        if (fit >= 2 && totalLines - fit >= 2) {
+          units.add(PageUnit(bi, 0, fit));
+          used += spaceAbove + acc;
+          flush();
+          pageStartChar = firstVisibleChar(bi, fit);
+          startLine = fit;
+        }
+      }
 
-      // 单块超页 → 按行切分
-      var lineIdx = 0;
+      if (startLine == 0) {
+        // 不可切分（标题/图片/分隔线）或剩余空间不足 2 行：整块移到下一页
+        flush();
+        pageStartChar = firstVisibleChar(bi, 0);
+      }
+
+      // 剩余行从新一页页首继续；整块超一页时按行跨多页切分
+      var lineIdx = startLine;
       var lineUsed = 0.0;
-      var unitFirstLine = 0;
+      var unitFirstLine = startLine;
       while (lineIdx < lb.lineHeights.length) {
         final h = lb.lineHeights[lineIdx];
         if (lineUsed + h > cfg.contentHeight && lineIdx > unitFirstLine) {
@@ -525,6 +557,22 @@ class TextPaginator {
       prefixChars: prefix.length,
       rubyRuns: rubyRuns,
     );
+  }
+
+  /// 块能否在页边界处按行切分：正文/引用/列表/代码可以；
+  /// 标题、图片、分隔线整块移动（跨页切开非常难看）。
+  static bool _splittableAcrossPage(LaidOutBlock lb) {
+    switch (lb.block.type) {
+      case BlockType.paragraph:
+      case BlockType.blockquote:
+      case BlockType.listItem:
+      case BlockType.code:
+        return true;
+      case BlockType.heading:
+      case BlockType.image:
+      case BlockType.hr:
+        return false;
+    }
   }
 
   /// 行网格量化：[v] 对齐到标准行高（fontSize×lineHeight）的整数倍。

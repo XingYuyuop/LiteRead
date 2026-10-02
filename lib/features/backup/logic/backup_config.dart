@@ -1,13 +1,22 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../../../app/theme_controller.dart';
 import '../../../core/storage/app_database.dart';
 import '../../library/data/book_repository.dart';
 import '../data/backup_service.dart';
 import '../data/lan_sync.dart';
+
+/// 默认本地备份目录：<系统文档目录>/LiteReadBackup。
+/// 用户未填写备份路径时使用，不存在时由备份流程自动创建。
+Future<String> defaultBackupPath() async {
+  final docs = await getApplicationDocumentsDirectory();
+  return '${docs.path}${Platform.pathSeparator}LiteReadBackup';
+}
 
 /// 备份目标类型
 enum BackupTargetType { local, webdav, s3, lan }

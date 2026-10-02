@@ -34,10 +34,13 @@ abstract class RemoteStore {
 // 本地文件夹
 // ---------------------------------------------------------------------------
 
-/// 本地文件夹存储：备份目录为用户选择目录下的自定义文件夹名
+/// 本地文件夹存储：[folderName] 为空时备份根目录就是 [parentDir] 本身
+/// （页面上输入什么路径就备份到哪里），否则为其下的子文件夹。
 class LocalFolderStore extends RemoteStore {
   LocalFolderStore(this.parentDir, this.folderName) {
-    root = Directory('${parentDir.path}${Platform.pathSeparator}$folderName');
+    root = folderName.trim().isEmpty
+        ? parentDir
+        : Directory('${parentDir.path}${Platform.pathSeparator}$folderName');
   }
 
   final Directory parentDir;

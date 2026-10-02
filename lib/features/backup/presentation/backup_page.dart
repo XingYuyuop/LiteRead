@@ -33,7 +33,8 @@ class _BackupPageState extends ConsumerState<BackupPage> {
   List<LanDevice> _devices = const [];
   bool _sharing = false;
 
-  late final TextEditingController _folderCtrl;
+  late final TextEditingController _localPathCtrl;
+  late final TextEditingController _lanAddrCtrl;
   late final TextEditingController _webdavUrlCtrl;
   late final TextEditingController _webdavUserCtrl;
   late final TextEditingController _webdavPassCtrl;
@@ -43,10 +44,14 @@ class _BackupPageState extends ConsumerState<BackupPage> {
   late final TextEditingController _s3SecretCtrl;
   late final TextEditingController _s3RegionCtrl;
 
+  /// 默认备份路径（留空时使用，页面提示用）
+  String _defaultPathHint = '';
+
   @override
   void initState() {
     super.initState();
-    _folderCtrl = TextEditingController();
+    _localPathCtrl = TextEditingController();
+    _lanAddrCtrl = TextEditingController();
     _webdavUrlCtrl = TextEditingController();
     _webdavUserCtrl = TextEditingController();
     _webdavPassCtrl = TextEditingController();
@@ -60,7 +65,8 @@ class _BackupPageState extends ConsumerState<BackupPage> {
 
   @override
   void dispose() {
-    _folderCtrl.dispose();
+    _localPathCtrl.dispose();
+    _lanAddrCtrl.dispose();
     _webdavUrlCtrl.dispose();
     _webdavUserCtrl.dispose();
     _webdavPassCtrl.dispose();
@@ -74,10 +80,12 @@ class _BackupPageState extends ConsumerState<BackupPage> {
 
   Future<void> _load() async {
     final cfg = await BackupConfig.load(ref.read(appDatabaseProvider));
+    final defPath = await defaultBackupPath();
     if (!mounted) return;
     setState(() {
       _cfg = cfg;
-      _folderCtrl.text = cfg.folderName;
+      _localPathCtrl.text = cfg.localPath;
+      _defaultPathHint = defPath;
       _webdavUrlCtrl.text = cfg.webdavUrl;
       _webdavUserCtrl.text = cfg.webdavUser;
       _webdavPassCtrl.text = cfg.webdavPass;
@@ -105,22 +113,22 @@ class _BackupPageState extends ConsumerState<BackupPage> {
       _cfg.folderName.trim().isEmpty ? 'LiteRead' : _cfg.folderName.trim();
 
   /// 按当前配置构建存储目标；配置不完整时提示并返回 null
-  RemoteStore? _safeStore() {
+  Future<RemoteStore?> _safeStore() async {
     try {
-      return _buildStore();
+      return await _buildStore();
     } on BackupException catch (e) {
       _toast(e.message);
       return null;
     }
   }
 
-  RemoteStore _buildStore() {
+  Future<RemoteStore> _buildStore() async {
     switch (_cfg.type) {
       case BackupTargetType.local:
-        if (_cfg.localPath.isEmpty) {
-          throw const BackupException('请先选择本地备份位置');
-        }
-        return LocalFolderStore(Directory(_cfg.localPath), _rootName);
+        // 路径留空 → 默认目录；目录不存在时备份流程会自动逐级创建
+        var path = _cfg.localPath.trim();
+        if (path.isEmpty) path = await defaultBackupPath();
+        return LocalFolderStore(Directory(path), '');
       case BackupTargetType.webdav:
         if (_cfg.webdavUrl.trim().isEmpty) {
           throw const BackupException('请填写 WebDAV 服务器地址');
@@ -182,7 +190,7 @@ class _BackupPageState extends ConsumerState<BackupPage> {
     )
     op,
   ) async {
-    final store = _safeStore();
+    final store = await _safeStore();
     if (store == null) return;
     setState(() {
       _busy = true;
@@ -276,7 +284,7 @@ class _BackupPageState extends ConsumerState<BackupPage> {
   }
 
   Future<void> _onRestore() async {
-    final store = _safeStore();
+    final store = await _safeStore();
     if (store == null) return;
     setState(() {
       _busy = true;
@@ -430,7 +438,10 @@ class _BackupPageState extends ConsumerState<BackupPage> {
       if (!mounted) return;
       setState(() => _devices = found);
       if (found.isEmpty) {
-        _toast('未发现局域网设备，请确认对端已开启「共享本机书库」');
+        _toast(
+          '未发现局域网设备：请确认对端已开启「共享本机书库」、'
+          '两台设备连同一网络${Platform.isWindows ? '，并尝试下方「防火墙放行」' : ''}',
+        );
       }
     } catch (e) {
       _toast('扫描失败：$e');
@@ -439,6 +450,42 @@ class _BackupPageState extends ConsumerState<BackupPage> {
         setState(() => _scanning = false);
       }
     }
+  }
+
+  /// 手动输入设备地址直连（扫描被路由器/防火墙拦截时的兜底）
+  Future<void> _connectManual() async {
+    if (_busy) return;
+    final raw = _lanAddrCtrl.text.trim();
+    if (raw.isEmpty) {
+      _toast('请输入设备地址，例如 192.168.1.100');
+      return;
+    }
+    var host = raw;
+    var port = lanSyncPort;
+    final idx = raw.lastIndexOf(':');
+    if (idx > 0 && !raw.startsWith('[')) {
+      host = raw.substring(0, idx);
+      port = int.tryParse(raw.substring(idx + 1)) ?? lanSyncPort;
+    }
+    setState(() => _busy = true);
+    try {
+      final device = await LanStorePing.ping(host, port);
+      if (!mounted) return;
+      if (device == null) {
+        _toast('连接失败：$host 未响应，请确认对端已开启共享且地址正确');
+        return;
+      }
+      await _confirmSyncWithDevice(device);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// Windows 防火墙放行（UAC 提权添加入站允许规则）
+  Future<void> _allowFirewall() async {
+    _toast('正在请求管理员权限添加防火墙规则…');
+    final err = await LanScanner.allowThroughWindowsFirewall();
+    _toast(err ?? '防火墙已放行，其他设备现在可以扫描到本机了');
   }
 
   /// 进入局域网配置或首次加载时自动扫描一次
@@ -670,6 +717,7 @@ class _BackupPageState extends ConsumerState<BackupPage> {
       dialogTitle: '选择备份位置',
     );
     if (path != null) {
+      _localPathCtrl.text = path;
       _update((c) => c.copyWith(localPath: path));
     }
   }
@@ -746,29 +794,29 @@ class _BackupPageState extends ConsumerState<BackupPage> {
                 ),
               ),
             ],
-            const _SectionHeader('存储文件夹'),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
-              child: TextField(
-                controller: _folderCtrl,
-                decoration: const InputDecoration(
-                  labelText: '文件夹名称',
-                  hintText: 'LiteRead',
-                  border: OutlineInputBorder(),
-                  isDense: true,
+            if (_cfg.type == BackupTargetType.local) ...[
+              const _SectionHeader('存储文件夹'),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+                child: TextField(
+                  controller: _localPathCtrl,
+                  decoration: InputDecoration(
+                    hintText: _defaultPathHint.isEmpty
+                        ? '留空使用默认备份文件夹'
+                        : '留空使用 $_defaultPathHint',
+                    border: const OutlineInputBorder(),
+                    isDense: true,
+                    suffixIcon: IconButton(
+                      tooltip: '选择文件夹',
+                      icon: const Icon(Icons.folder_open_outlined),
+                      onPressed: _pickLocalDir,
+                    ),
+                  ),
+                  onChanged: (v) =>
+                      _update((c) => c.copyWith(localPath: v.trim())),
                 ),
-                onChanged: (v) => _update((c) => c.copyWith(folderName: v)),
               ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-              child: Text(
-                '备份文件（含设备名与时间）放在此文件夹下，'
-                '书籍文件、进度、封面分别存放在 book/、progress/、covers/ 子文件夹。'
-                '备份目标不存在此文件夹时会自动创建。',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ),
+            ],
             const _SectionHeader('备份目标'),
             for (final t in BackupTargetType.values)
               ListTile(
@@ -917,16 +965,8 @@ class _BackupPageState extends ConsumerState<BackupPage> {
   List<Widget> _buildTargetConfig() {
     switch (_cfg.type) {
       case BackupTargetType.local:
-        return [
-          ListTile(
-            leading: const Icon(Icons.folder_outlined),
-            title: const Text('备份位置'),
-            subtitle: Text(
-              _cfg.localPath.isEmpty ? '未选择（点击选择目录）' : _cfg.localPath,
-            ),
-            onTap: _pickLocalDir,
-          ),
-        ];
+        // 存储文件夹路径输入在页面顶部「存储文件夹」区（输入即备份位置）
+        return const [];
       case BackupTargetType.webdav:
         return [
           _TextField(
@@ -1015,6 +1055,39 @@ class _BackupPageState extends ConsumerState<BackupPage> {
         subtitle: const Text('自动发现开启共享的 LiteRead 设备'),
         onTap: _scanning ? null : _scanDevices,
       ),
+      // 手动地址直连（扫描被路由器/防火墙拦截时的兜底）
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 4, 8, 4),
+        child: Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _lanAddrCtrl,
+                decoration: const InputDecoration(
+                  labelText: '设备地址',
+                  hintText: '192.168.1.100 或 192.168.1.100:47816',
+                  isDense: true,
+                  border: OutlineInputBorder(),
+                ),
+                onSubmitted: (_) => _connectManual(),
+              ),
+            ),
+            const SizedBox(width: 8),
+            TextButton(
+              onPressed: _busy ? null : _connectManual,
+              child: const Text('连接'),
+            ),
+          ],
+        ),
+      ),
+      if (Platform.isWindows)
+        ListTile(
+          dense: true,
+          leading: const Icon(Icons.security_outlined),
+          title: const Text('防火墙放行'),
+          subtitle: const Text('其他设备扫描不到本机时点击（需管理员权限）'),
+          onTap: _allowFirewall,
+        ),
       for (final d in _devices)
         ListTile(
           dense: true,

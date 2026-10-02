@@ -162,20 +162,24 @@ jobs:
       - name: 构建 Release 说明（仅编号式更新日志）
         run: |
           {
-            # 更新日志：上个 tag 到当前提交的提交摘要，以「1. 2. …」编号列出；
-            # 跳过 chore 提交（版本号 bump），去掉 type 前缀（如 feat:）
+            # 更新日志：上个 tag 到当前提交的提交摘要 → 跳过 chore（版本号 bump）
+            # → 去 type 前缀（如 feat:）与「vX.Y.Z——」版本前缀
+            # → 按「、」「；」拆成独立条目（sed 处理多字节安全；tr 按字节拆会破坏 UTF-8）
+            # → 去首尾空白、滤空行 → 以「1. 2. …」编号列出
             PREV=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null \
               || git describe --tags --abbrev=0 HEAD 2>/dev/null || true)
+            changelog() {
+              grep -v '^chore' \
+                | sed 's/^[a-zA-Z][a-zA-Z]*\(([^)]*)\)\{0,1\}: *//; s/^v[0-9][0-9.]*—— *//' \
+                | sed 's/、/\n/g; s/；/\n/g' \
+                | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+                | grep -v '^$' \
+                | awk '{printf "%d. %s\n", NR, $0}'
+            }
             if [ -n "$PREV" ]; then
-              git log --pretty=format:'%s' "$PREV..HEAD" \
-                | grep -v '^chore' \
-                | sed 's/^[a-zA-Z][a-zA-Z]*\(([^)]*)\)\{0,1\}: *//; s/^v[0-9][0-9.]*—— *//' \
-                | awk '{printf "%d. %s\n", NR, $0}'
+              git log --pretty=format:'%s' "$PREV..HEAD" | changelog
             else
-              git log --pretty=format:'%s' -8 \
-                | grep -v '^chore' \
-                | sed 's/^[a-zA-Z][a-zA-Z]*\(([^)]*)\)\{0,1\}: *//; s/^v[0-9][0-9.]*—— *//' \
-                | awk '{printf "%d. %s\n", NR, $0}'
+              git log --pretty=format:'%s' -8 | changelog
             fi
           } > release-body.md
       - uses: softprops/action-gh-release@v2

@@ -5,6 +5,16 @@ import '../ui/app_snackbar.dart';
 import 'app_updater.dart';
 import 'update_service.dart';
 
+/// 更新日志按行拆分为列表条目：去 Markdown 前缀（# / - / * / • / 1.）与空白行
+List<String> changelogItems(String raw) {
+  return raw
+      .split(RegExp(r'\r?\n'))
+      .map((l) => l.trim())
+      .map((l) => l.replaceFirst(RegExp(r'^(?:#{1,6}|[-*•]|\d+[.、)])\s*'), ''))
+      .where((l) => l.isNotEmpty)
+      .toList();
+}
+
 /// 更新提示弹窗（设置页手动检查与启动自动检查共用）：
 /// 版本号对比 + 更新日志 + 应用内直接更新
 Future<void> showUpdateFoundDialog(BuildContext context, UpdateInfo info) {
@@ -36,12 +46,7 @@ Future<void> showUpdateFoundDialog(BuildContext context, UpdateInfo info) {
                 ),
               ),
               const SizedBox(height: 6),
-              SelectableText(
-                info.changelog.trim().isEmpty
-                    ? '（该版本未提供更新日志）'
-                    : info.changelog.trim(),
-                style: const TextStyle(fontSize: 13, height: 1.6),
-              ),
+              _ChangelogList(info.changelog),
             ],
           ),
         ),
@@ -75,4 +80,44 @@ Future<void> showUpdateFoundDialog(BuildContext context, UpdateInfo info) {
       ],
     ),
   );
+}
+
+/// 更新日志列表：每条一行、带圆点前缀，内容可选中复制
+class _ChangelogList extends StatelessWidget {
+  const _ChangelogList(this.changelog);
+
+  final String changelog;
+
+  @override
+  Widget build(BuildContext context) {
+    final items = changelogItems(changelog);
+    if (items.isEmpty) {
+      return const SelectableText(
+        '（该版本未提供更新日志）',
+        style: TextStyle(fontSize: 13, height: 1.6),
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final item in items)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('•  ', style: TextStyle(fontSize: 13, height: 1.6)),
+                Expanded(
+                  child: SelectableText(
+                    item,
+                    style: const TextStyle(fontSize: 13, height: 1.6),
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
 }
