@@ -10,6 +10,7 @@ import '../../../core/ui/app_snackbar.dart';
 import '../../../core/update/update_service.dart';
 import '../../../core/update/update_ui.dart';
 import '../../reader/logic/reader_settings.dart';
+import '../logic/app_prefs.dart';
 
 /// 设置中心（M1：主题/排版/关于；完整 45 项随 M2 扩展）
 class SettingsPage extends ConsumerStatefulWidget {
@@ -24,6 +25,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   void initState() {
     super.initState();
     _loadUpdateInterval();
+    _loadAutoOpenLast();
+  }
+
+  Future<void> _loadAutoOpenLast() async {
+    final v = await loadAutoOpenLastBook(ref.read(appDatabaseProvider));
+    if (!mounted) return;
+    setState(() => _autoOpenLast = v);
   }
 
   Future<void> _loadUpdateInterval() async {
@@ -131,6 +139,17 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   .update((s) => s.copyWith(inkMode: v)),
             ),
           ),
+          const _SectionHeader('通用'),
+          SwitchListTile(
+            secondary: const Icon(Icons.auto_stories_outlined),
+            title: const Text('启动时打开上次阅读的书'),
+            subtitle: const Text('进入应用后自动跳转到最近阅读的书籍'),
+            value: _autoOpenLast,
+            onChanged: (v) {
+              setState(() => _autoOpenLast = v);
+              saveAutoOpenLastBook(ref.read(appDatabaseProvider), v);
+            },
+          ),
           const _SectionHeader('数据'),
           ListTile(
             leading: const Icon(Icons.query_stats),
@@ -191,6 +210,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
   UpdateService? _updateService;
   int _updateInterval = 7;
+
+  // ---- 启动时打开上次阅读的书 ----
+  bool _autoOpenLast = true;
 
   /// 手动检查更新：结果弹窗展示更新日志
   Future<void> _checkUpdate(BuildContext context, WidgetRef ref) async {

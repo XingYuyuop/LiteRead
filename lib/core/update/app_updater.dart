@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:archive/archive.dart';
@@ -86,8 +87,7 @@ Future<bool> runInAppUpdate(BuildContext context, UpdateInfo info) async {
 
   try {
     if (Platform.isAndroid) {
-      // 唤起系统安装器（需用户在系统弹窗中确认安装）
-      await _channel.invokeMethod('installApk', {'path': file!.path});
+      await _installApkAndroid(context, file!.path);
     } else if (Platform.isWindows) {
       final restart = await showDialog<bool>(
         context: context,
@@ -121,6 +121,62 @@ Future<bool> runInAppUpdate(BuildContext context, UpdateInfo info) async {
     if (context.mounted) showAppSnackBar(context, '安装失败：$e');
   }
   return true;
+}
+
+/// Android 安装：直接唤起系统安装器；缺少「安装未知应用」权限时
+/// 弹窗引导用户去系统设置授权，返回后自动重试安装。
+Future<void> _installApkAndroid(BuildContext context, String path) async {
+  try {
+    await _channel.invokeMethod('installApk', {'path': path});
+    return;
+  } on PlatformException catch (e) {
+    if (e.code != 'NO_INSTALL_PERMISSION') rethrow;
+  }
+  if (!context.mounted) return;
+  final go = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('需要安装权限'),
+      content: const Text(
+        '安装更新需要允许本应用「安装未知应用」。\n点击「去授权」打开系统设置，'
+        '开启开关后返回，应用会自动继续安装。',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, false),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(ctx, true),
+          child: const Text('去授权'),
+        ),
+      ],
+    ),
+  );
+  if (go != true || !context.mounted) return;
+
+  await _channel.invokeMethod('openInstallPermissionSettings');
+
+  // 等待用户从系统设置返回（3 分钟超时兜底），随后自动重试安装
+  final resumed = Completer<void>();
+  final listener = AppLifecycleListener(onResume: resumed.complete);
+  try {
+    await resumed.future.timeout(const Duration(minutes: 3), onTimeout: () {});
+  } finally {
+    listener.dispose();
+  }
+  if (!context.mounted) return;
+  await _installApkAndroid(context, path);
+}
+
+/// 首次启动请求本地存储权限（仅 Android；失败静默，不阻塞启动）
+Future<void> requestStoragePermission() async {
+  if (!Platform.isAndroid) return;
+  try {
+    await _channel.invokeMethod('requestStoragePermission');
+  } catch (_) {
+    // 权限请求失败不阻塞启动
+  }
 }
 
 /// 下载安装包到临时目录，通过 Notifier 上报进度

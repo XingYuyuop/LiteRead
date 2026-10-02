@@ -500,8 +500,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
       });
       return;
     }
-    // 保留选择，显示操作条（由 overlay 层渲染）
-    setState(() {});
+    // 长按直接划下划线（默认色），无需再点「划线」按钮
+    _saveSelectionHighlight(0, 1);
   }
 
   /// 局部坐标 → 章内字符偏移
@@ -613,25 +613,29 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     });
   }
 
-  /// 划词/批注操作条：贴近划线位置悬浮（上方优先，空间不足放下方）。
-  /// 标注统一样式为下划线，划线直接以默认样式保存。
+  /// 批注操作条：贴近批注位置悬浮（上方优先，空间不足放下方）。
+  /// 长按划词松手即直接保存下划线；操作条仅用于已有批注（笔记/复制/删除）。
   /// 无「取消」按钮：点击屏幕其他区域即自动关闭选择状态。
   Widget _buildSelectionOverlay(ReaderThemeSpec spec, Size areaSize) {
     final active = _activeHighlight;
-    final actions = active == null
-        ? <(String, IconData, VoidCallback)>[
-            (
-              '划线',
-              Icons.format_underline_outlined,
-              // 默认色 + 下划线样式，直接保存
-              () => _saveSelectionHighlight(0, 1),
-            ),
-            ('复制', Icons.copy_outlined, _copySelection),
-          ]
-        : <(String, IconData, VoidCallback)>[
-            ('笔记', Icons.edit_note_outlined, () => _editNote(active)),
-            ('删除', Icons.delete_outline, () => _deleteHighlight(active)),
-          ];
+    if (active == null) return const SizedBox.shrink();
+    final actions = <(String, IconData, VoidCallback)>[
+      ('笔记', Icons.edit_note_outlined, () => _editNote(active)),
+      (
+        '复制',
+        Icons.copy_outlined,
+        () {
+          Clipboard.setData(ClipboardData(text: active.text));
+          showAppSnackBar(
+            context,
+            '已复制',
+            duration: const Duration(milliseconds: 800),
+          );
+          _clearSelection();
+        },
+      ),
+      ('删除', Icons.delete_outline, () => _deleteHighlight(active)),
+    ];
     final pill = Material(
       color: spec.background,
       elevation: 6,
@@ -681,26 +685,17 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
       ),
     );
 
-    // 计算选区/批注在页面上的包围盒，让操作条出现在划线位置附近
+    // 计算批注在页面上的包围盒，让操作条出现在划线位置附近
     final s = ref.read(readerControllerProvider);
     final laid = _laidOf(s);
     Rect? anchor;
     if (laid != null && s.pageIndex < laid.pages.length) {
-      final int a;
-      final int b;
-      if (active != null) {
-        a = active.startChar;
-        b = active.endChar;
-      } else {
-        a = _selStart! < _selEnd! ? _selStart! : _selEnd!;
-        b = _selStart! < _selEnd! ? _selEnd! : _selStart!;
-      }
       anchor = PageCanvas.selectionRect(
         laid,
         laid.pages[s.pageIndex],
         _effMargins,
-        a,
-        b,
+        active.startChar,
+        active.endChar,
       );
     }
     if (anchor == null) {
@@ -763,19 +758,6 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
       await _loadHighlights();
     } catch (_) {
       // 保存失败不阻塞阅读
-    }
-    _clearSelection();
-  }
-
-  void _copySelection() {
-    final text = _selectedText;
-    if (text != null) {
-      Clipboard.setData(ClipboardData(text: text));
-      showAppSnackBar(
-        context,
-        '已复制',
-        duration: const Duration(milliseconds: 800),
-      );
     }
     _clearSelection();
   }

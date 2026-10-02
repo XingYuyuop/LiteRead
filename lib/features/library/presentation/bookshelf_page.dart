@@ -12,10 +12,12 @@ import '../../../app/theme_controller.dart';
 import '../../../core/storage/app_database.dart';
 import '../../../core/theme/reader_theme.dart';
 import '../../../core/ui/app_snackbar.dart';
+import '../../../core/update/app_updater.dart';
 import '../../../core/update/update_service.dart';
 import '../../../core/update/update_ui.dart';
 import '../../backup/data/lan_sync.dart';
 import '../../backup/logic/backup_config.dart';
+import '../../settings/logic/app_prefs.dart';
 import '../data/book_repository.dart';
 
 /// 书架视图偏好（排序 / 网格切换），持久化到 settings_kv
@@ -65,6 +67,9 @@ final bookshelfPrefsProvider =
       BookshelfPrefsController.new,
     );
 
+/// 启动自动跳转上次阅读书籍的进程级防重（书架重建不重复触发）
+bool _autoOpenTried = false;
+
 /// 支持拖入/选择的书籍扩展名
 const _supportedExtensions = [
   'epub',
@@ -108,7 +113,46 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
   void initState() {
     super.initState();
     // 启动后按配置周期自动检查更新（有新版本才弹提示）
-    WidgetsBinding.instance.addPostFrameCallback((_) => _autoUpdateCheck());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _autoUpdateCheck();
+      _autoOpenLastBook();
+      _requestStoragePermissionOnce();
+    });
+  }
+
+  /// 设置开启时，启动后自动进入最近阅读的书籍（每次应用进程仅一次）
+  Future<void> _autoOpenLastBook() async {
+    if (_autoOpenTried) return;
+    _autoOpenTried = true;
+    try {
+      final db = ref.read(appDatabaseProvider);
+      if (!await loadAutoOpenLastBook(db)) return;
+      final books = await ref.read(bookRepositoryProvider).listBooks();
+      for (final b in books) {
+        if (b.lastReadAt != null) {
+          // 稍等书架首帧渲染完成再跳转，避免白屏观感
+          await Future<void>.delayed(const Duration(milliseconds: 400));
+          if (!mounted) return;
+          context.push('/reader/${b.id}');
+          return;
+        }
+      }
+    } catch (_) {
+      // 自动跳转失败静默，不打扰使用
+    }
+  }
+
+  /// Android 首次启动请求本地存储权限（读取插图/封面等场景）
+  Future<void> _requestStoragePermissionOnce() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final db = ref.read(appDatabaseProvider);
+      if (await db.getSetting('perm.storageAsked') != null) return;
+      await db.setSetting('perm.storageAsked', 'true');
+      await requestStoragePermission();
+    } catch (_) {
+      // 权限流程失败不影响启动
+    }
   }
 
   Future<void> _autoUpdateCheck() async {
