@@ -246,17 +246,23 @@ jobs:
             # → 去 type 前缀（如 feat:）与「vX.Y.Z——」版本前缀
             # → 按「、」「；」拆成独立条目（sed 处理多字节安全；tr 按字节拆会破坏 UTF-8）
             # → 去首尾空白、滤空行 → 以「1. 2. …」编号列出
-            PREV=$(git describe --tags --abbrev=0 "${{ needs.meta.outputs.sha }}" 2>/dev/null || true)
+            # 注意：必须从目标提交的父提交开始 describe——checkout（fetch-depth: 0）
+            # 会拉取发布 tag 本身，从目标提交 describe 会命中 v(X.Y.Z)，
+            # 区间为空 → 管道空输入 → grep 退出码 1 → pipefail 使步骤失败
+            SHA="${{ needs.meta.outputs.sha }}"
+            PREV=$(git describe --tags --abbrev=0 "${SHA}^" 2>/dev/null || true)
+            # 管道内用 awk 而非 grep：grep 无选中行时退出码 1，pipefail 下会炸步骤；
+            # awk 恒为退出码 0，空输入安全
             changelog() {
-              grep -v '^chore' \
+              awk '$0 !~ /^chore/' \
                 | sed 's/^[a-zA-Z][a-zA-Z]*\(([^)]*)\)\{0,1\}: *//; s/^v[0-9][0-9.]*—— *//' \
                 | sed 's/、/\n/g; s/；/\n/g' \
                 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
-                | grep -v '^$' \
+                | awk 'NF' \
                 | awk '{printf "%d. %s\n", NR, $0}'
             }
             if [ -n "$PREV" ]; then
-              git log --pretty=format:'%s' "$PREV..${{ needs.meta.outputs.sha }}" | changelog
+              git log --pretty=format:'%s' "$PREV..$SHA" | changelog
             else
               git log --pretty=format:'%s' -8 | changelog
             fi
