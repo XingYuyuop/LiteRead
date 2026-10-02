@@ -461,6 +461,7 @@ class LanSyncServer {
 
 /// WiFi 传书网页：PC 浏览器访问 `http://<设备IP>:<端口>` 直接上传书籍。
 /// 上传用 XHR 原始字节流（POST /api/upload?name=），可读进度百分比。
+/// 支持拖入上传：文件拖到页面任意位置即可发送，也可点击选择文件。
 const _uploadPageHtml = r'''<!DOCTYPE html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
@@ -478,10 +479,12 @@ h1{font-size:20px;margin-bottom:4px}
 display:flex;align-items:center;justify-content:center}
 .tip{color:var(--sub);font-size:13px;line-height:1.7;margin:14px 0 18px}
 #pick{display:none}
-.btn{display:inline-block;background:var(--acc);color:#fff;border:none;border-radius:24px;
-padding:12px 34px;font-size:15px;cursor:pointer}
-.btn:active{opacity:.85}
-.btn[disabled]{opacity:.4;cursor:default}
+#drop{margin-top:16px;border:2px dashed #E3DDD2;border-radius:14px;padding:26px 16px;
+cursor:pointer;transition:border-color .15s,background .15s;background:#FCFBF9}
+#drop .big{font-size:15px;font-weight:600;margin-top:10px}
+#drop .small{color:var(--sub);font-size:12px;margin-top:5px}
+#drop.on{border-color:var(--acc);background:#FFF6EE}
+#drop.on .big{color:var(--acc)}
 ul{list-style:none;margin-top:18px;text-align:left;max-height:220px;overflow:auto}
 li{padding:8px 2px;font-size:13px;border-bottom:1px solid #F0EDE8;display:flex;justify-content:space-between;gap:8px}
 li .st{color:var(--sub);white-space:nowrap}
@@ -499,14 +502,30 @@ li .st.ok{color:#2AA952}.st.dup{color:var(--acc)}.st.err{color:#D93025}
   </div>
   <div style="font-size:14px">选择书籍文件，通过局域网发送到本设备</div>
   <p class="tip">支持 EPUB / TXT / MOBI / AZW3 / PDF / FB2 / CBZ<br>发送后书籍会自动出现在书架中</p>
-  <label class="btn" id="pickBtn">选择文件</label>
+  <div id="drop">
+    <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#8A8378" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 15V4"/><path d="m8 8 4-4 4 4"/>
+      <path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>
+    </svg>
+    <div class="big">拖入文件上传</div>
+    <div class="small">或点击选择文件（可多选）</div>
+  </div>
   <input type="file" id="pick" multiple accept=".epub,.txt,.mobi,.azw3,.pdf,.fb2,.cbz">
   <ul id="list"></ul>
 </div>
 <script>
-const pick=document.getElementById('pick'),btn=document.getElementById('pickBtn'),list=document.getElementById('list');
-btn.onclick=()=>pick.click();
+const pick=document.getElementById('pick'),drop=document.getElementById('drop'),list=document.getElementById('list');
+drop.onclick=()=>pick.click();
 pick.onchange=()=>{for(const f of pick.files)send(f);pick.value='';};
+// 拖入上传：整个页面均为放置目标
+let dragDepth=0;
+window.addEventListener('dragenter',e=>{e.preventDefault();dragDepth++;drop.classList.add('on');});
+window.addEventListener('dragover',e=>{e.preventDefault();});
+window.addEventListener('dragleave',e=>{e.preventDefault();if(--dragDepth<=0){dragDepth=0;drop.classList.remove('on');}});
+window.addEventListener('drop',e=>{
+  e.preventDefault();dragDepth=0;drop.classList.remove('on');
+  for(const f of e.dataTransfer.files)send(f);
+});
 function send(f){
   const li=document.createElement('li');
   li.innerHTML='<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span><span class="st">0%</span><div class="bar" style="position:absolute"></div>';

@@ -75,6 +75,37 @@ class PageCanvas extends StatelessWidget {
     _PagePainter.imageLoading.clear();
   }
 
+  /// 图片页（整页仅插图/分隔线）垂直居中偏移：让整页插图在版心内
+  /// 上下均衡分布，而不是堆在页首、页尾留大片空白。
+  /// 绘制与命中测试共用同一计算，保证长按查看大图的判定准确。
+  static double imagePageTopOffset(
+    LaidOutChapter laid,
+    PageBox page,
+    EdgeInsets margins,
+  ) {
+    if (page.units.isEmpty) return 0;
+    final allVisual = page.units.every((u) {
+      final lb = laid.blocks[u.blockIndex];
+      return lb.isImage || lb.block.type == BlockType.hr;
+    });
+    if (!allVisual) return 0;
+    var total = 0.0;
+    for (final unit in page.units) {
+      final lb = laid.blocks[unit.blockIndex];
+      final spaceAbove = identical(unit, page.units.first)
+          ? 0.0
+          : lb.spaceAbove;
+      total +=
+          spaceAbove +
+          lb.lineHeights.skip(unit.firstLine).take(unit.lineCount).fold(
+            0.0,
+            (a, b) => a + b,
+          );
+    }
+    final free = laid.config.contentHeight - total;
+    return free > 0 ? free / 2 : 0;
+  }
+
   /// 局部坐标 → 章内扁平文本字符偏移；未命中文本返回 null。
   /// 批注长按划词的命中实现（CustomPaint 无 TextField，需自行换算）。
   static int? hitTestChar(
@@ -118,7 +149,8 @@ class PageCanvas extends StatelessWidget {
   }
 
   /// 局部坐标 → 命中的图片资源 src（长按查看大图用）；未命中返回 null。
-  /// 判定逻辑与 _PagePainter._paintImage 的布局保持一致。
+  /// 判定逻辑与 _PagePainter._paintImage 的布局保持一致
+  /// （含整页插图的垂直居中偏移）。
   static String? hitTestImage(
     LaidOutChapter laid,
     PageBox page,
@@ -126,7 +158,7 @@ class PageCanvas extends StatelessWidget {
     Offset local,
   ) {
     final cfg = laid.config;
-    var y = margins.top;
+    var y = margins.top + imagePageTopOffset(laid, page, margins);
     for (final unit in page.units) {
       final lb = laid.blocks[unit.blockIndex];
       final spaceAbove = identical(unit, page.units.first)
@@ -240,7 +272,7 @@ class _PagePainter extends CustomPainter {
 
     final cfg = laid.config;
     final x0 = margins.left;
-    final y0 = margins.top;
+    final y0 = margins.top + PageCanvas.imagePageTopOffset(laid, page, margins);
     var y = y0;
 
     for (final unit in page.units) {
@@ -490,6 +522,7 @@ class _PagePainter extends CustomPainter {
     final rect = Rect.fromLTWH(x, y, w, h);
     final img = src != null ? imageCache[src] : null;
     if (img != null) {
+      // aspect-fit 居中 + 圆角裁切 + 中等滤波：插图观感更精致
       final srcRect = Rect.fromLTWH(
         0,
         0,
@@ -504,27 +537,47 @@ class _PagePainter extends CustomPainter {
         width: img.width * s,
         height: img.height * s,
       );
-      canvas.drawImageRect(img, srcRect, dst, Paint());
+      final rrect = RRect.fromRectAndRadius(dst, const Radius.circular(8));
+      // 柔和投影：让插图从页面上轻微浮起
+      canvas.drawRRect(
+        rrect.shift(const Offset(0, 2)),
+        Paint()
+          ..color = theme.secondary.withValues(alpha: 0.18)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5),
+      );
+      canvas.save();
+      canvas.clipRRect(rrect);
+      canvas.drawImageRect(
+        img,
+        srcRect,
+        dst,
+        Paint()..filterQuality = FilterQuality.medium,
+      );
+      canvas.restore();
       return;
     }
-    canvas.drawRect(
-      rect,
-      Paint()..color = theme.secondary.withValues(alpha: 0.12),
+    // 加载占位：圆角浅色卡片 + 居中加载环（与成品图同样的 aspect-fit 区域）
+    final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(8));
+    canvas.drawRRect(rrect, Paint()..color = theme.secondary.withValues(alpha: 0.08));
+    canvas.drawRRect(
+      rrect,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1
+        ..color = theme.secondary.withValues(alpha: 0.22),
     );
-    final tp = TextPainter(
-      text: TextSpan(
-        text: '图片',
-        style: TextStyle(
-          color: theme.secondary.withValues(alpha: 0.7),
-          fontSize: 13,
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-    );
-    tp.layout();
-    tp.paint(
-      canvas,
-      Offset(rect.center.dx - tp.width / 2, rect.center.dy - tp.height / 2),
+    final ringR = 14.0;
+    final ringPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2
+      ..strokeCap = StrokeCap.round
+      ..color = theme.accent.withValues(alpha: 0.55);
+    canvas.drawArc(
+      Rect.fromCircle(center: rect.center, radius: ringR),
+      -1.57,
+      4.4,
+      false,
+      ringPaint,
     );
     if (src != null && resources != null && !imageLoading.contains(src)) {
       imageLoading.add(src);
@@ -536,9 +589,10 @@ class _PagePainter extends CustomPainter {
     try {
       final data = await resources!.get(src);
       if (data == null || data.isEmpty) return;
+      // 以 2048px 解码：桌面端大窗口（HiDPI 物理像素 > 1024）不再发虚
       final codec = await ui.instantiateImageCodec(
         Uint8List.fromList(data),
-        targetWidth: 1024,
+        targetWidth: 2048,
       );
       final frame = await codec.getNextFrame();
       imageCache[src] = frame.image;
@@ -559,17 +613,21 @@ class _PagePainter extends CustomPainter {
       !listEquals(old.marks, marks);
 }
 
-/// 翻页动画类型
-enum PageTurnType { none, cover, slide, fade }
+/// 翻页动画类型（无/覆盖/平移）
+enum PageTurnType { none, cover, slide }
 
 PageTurnType pageTurnTypeOf(String s) => switch (s) {
   'none' => PageTurnType.none,
   'slide' => PageTurnType.slide,
-  'fade' => PageTurnType.fade,
+  // 历史设置中的 'fade' 已下线，归入覆盖
   _ => PageTurnType.cover,
 };
 
-/// 页面流：三区点按 + 拖拽 + 四种翻页动画（无/覆盖/平移/淡入，180ms ease-out）。
+/// 覆盖动画的视差幅度（底层页位移比例）与压暗峰值
+const _coverParallax = 0.2;
+const _coverDim = 0.35;
+
+/// 页面流：三区点按 + 拖拽 + 三种翻页动画（无/覆盖/平移，180ms ease-out）。
 class PageFlow extends StatefulWidget {
   const PageFlow({
     super.key,
@@ -778,13 +836,46 @@ class _PageFlowState extends State<PageFlow>
               return RepaintBoundary(child: widget.buildPage());
             }
             if (!hasOutgoing && _dragging && widget.animType != PageTurnType.none) {
-              // 拖拽反馈：当前页跟手平移（peek），邻页未排版时无对接页。
+              // 拖拽反馈与松手后的动画状态无缝衔接（进度同为 t，松手不跳变）：
+              // - 平移：当前页跟手全幅位移（松手后即为动画中旧页位置）
+              // - 覆盖-前进：当前页=底层页，视差左移 + 渐暗（松手后新页自右缘盖入）
+              // - 覆盖-后退：当前页=顶层页，跟手右移滑出（松手后继续滑出揭出新页）
               // RepaintBoundary 放在 Transform 内层：平移只改图层偏移，
               // 不触发整页重绘（修复桌面端长按拖动的卡顿）。
-              return Transform.translate(
-                offset: Offset(-dir * t * width * 0.25, 0),
+              final Offset off;
+              double? dim;
+              switch (widget.animType) {
+                case PageTurnType.slide:
+                  off = Offset(-dir * t * width, 0);
+                case PageTurnType.cover:
+                  if (dir > 0) {
+                    off = Offset(-_coverParallax * t * width, 0);
+                    dim = _coverDim * t;
+                  } else {
+                    off = Offset(t * width, 0);
+                  }
+                case PageTurnType.none:
+                  off = Offset.zero;
+              }
+              Widget page = Transform.translate(
+                offset: off,
                 child: RepaintBoundary(child: widget.buildPage()),
               );
+              if (dim != null && dim > 0.001) {
+                page = Stack(
+                  children: [
+                    Positioned.fill(child: page),
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: ColoredBox(
+                          color: Colors.black.withValues(alpha: dim),
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              }
+              return page;
             }
             return _StackPages(
               current: RepaintBoundary(child: widget.buildPage()),
@@ -824,7 +915,8 @@ class _StackPages extends StatelessWidget {
     if (old == null || type == PageTurnType.none) return current;
     switch (type) {
       case PageTurnType.slide:
-        // 平移：双页同步位移（经典 push）——新页从侧面推入，旧页被推出
+        // 平移：双页刚性同步位移（经典 push）——
+        // 新页与旧页像两张连着的卡片一起移动，全程等速、无阴影层次
         return Stack(
           children: [
             Positioned.fill(
@@ -842,54 +934,60 @@ class _StackPages extends StatelessWidget {
           ],
         );
       case PageTurnType.cover:
-        // 覆盖：底层页完全静止，顶层页带阴影滑入/滑出盖住——
-        // 与平移的差别：下层不跟随移动 + 前导边缘投影
+        // 覆盖（参考 iOS 导航 push / 主流阅读 App）：
+        // - 前进：新页自右缘滑入盖在旧页上方；旧页以 20% 幅度视差左移并逐渐压暗
+        // - 后退：旧页向右滑出揭出新页；新页从 -20% 视差位归位、压暗逐渐解除
+        // 与平移的本质区别：底层页视差移动 + 压暗，顶层页带前导边缘投影
         final topPage = dir > 0 ? current : old;
         final underPage = dir > 0 ? old : current;
+        // 顶层页：前进时从右缘外滑入（1→0），后退时从 0 滑回右缘外（0→1）
         final topOffset = dir > 0 ? (1 - t) * width : t * width;
+        // 底层页：前进 0→-20%，后退 -20%→0（视差跟随）
+        final underOffset =
+            -_coverParallax * (dir > 0 ? t : 1 - t) * width;
+        // 底层页压暗：进度越深越暗，随覆盖完成收敛
+        final dim = _coverDim * (dir > 0 ? t : 1 - t);
         return Stack(
           children: [
-            Positioned.fill(child: RepaintBoundary(child: underPage)),
+            Positioned.fill(
+              child: Transform.translate(
+                offset: Offset(underOffset, 0),
+                child: RepaintBoundary(child: underPage),
+              ),
+            ),
+            // 底层页压暗层（在顶层页之下，只盖住底层页可见区域）
+            if (dim > 0.001)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: ColoredBox(
+                    color: Colors.black.withValues(alpha: dim),
+                  ),
+                ),
+              ),
             Positioned.fill(
               child: Transform.translate(
                 offset: Offset(topOffset, 0),
                 child: RepaintBoundary(child: topPage),
               ),
             ),
-            // 前导边缘阴影（随滑动收敛），强化「覆盖」层次感
+            // 顶层页前导边缘投影（随滑动收敛），强化「上层卡片」立体感
             Positioned(
-              left: dir > 0 ? topOffset - 24 : topOffset,
-              width: 24,
+              left: topOffset - 28,
+              width: 28,
               top: 0,
               bottom: 0,
               child: IgnorePointer(
                 child: DecoratedBox(
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
-                      begin: dir > 0 ? Alignment.centerRight : Alignment.centerLeft,
-                      end: dir > 0 ? Alignment.centerLeft : Alignment.centerRight,
+                      begin: Alignment.centerLeft,
+                      end: Alignment.centerRight,
                       colors: [
-                        Colors.black.withValues(alpha: 0.30 * (1 - t)),
                         Colors.transparent,
+                        Colors.black.withValues(alpha: 0.28 * (1 - t)),
                       ],
                     ),
                   ),
-                ),
-              ),
-            ),
-          ],
-        );
-      case PageTurnType.fade:
-        // 淡入：交叉淡化 + 新页轻微缩放浮入——与覆盖/平移的纯位移明显不同
-        return Stack(
-          children: [
-            Positioned.fill(child: Opacity(opacity: 1 - t, child: old)),
-            Positioned.fill(
-              child: Opacity(
-                opacity: t,
-                child: Transform.scale(
-                  scale: 0.96 + 0.04 * t,
-                  child: current,
                 ),
               ),
             ),

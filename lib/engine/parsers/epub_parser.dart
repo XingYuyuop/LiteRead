@@ -155,6 +155,9 @@ class EpubParser {
 
     // 5. 逐章解析
     final chapters = <Chapter>[];
+    // 无正文章节（纯插图页等）的 spine 序号：目录解析完成后回填目录标题
+    final noHeadingIndices = <int>[];
+    final noHeadingHtmlTitles = <int, String>{};
     // 每章的 id 锚点表（目录锚点 → 章内字符偏移；与 chapters 同序）
     final anchorMaps = <Map<String, (int, int)>>[];
     for (final href in spineHrefs) {
@@ -188,17 +191,25 @@ class EpubParser {
         }
       }
       // 目录标题兜底：不用 cover/section006 等原始文件名标识，
-      // 首个标题块 → 「第 N 节」
-      final chapterTitle =
-          _firstHeading(doc) ?? '第 ${chapters.length + 1} 节';
-      chapters.add(
-        Chapter(
-          id: href,
-          title: chapterTitle,
-          blocks: blocks,
-          footnotes: footnotes,
-        ),
-      );
+      // 首个标题块 → 「第 N 节」；纯插图页等无标题章节记录下来，
+      // 待目录解析完成后回填目录标题（插图/序章等）
+      final heading = _firstHeading(doc);
+      if (heading != null) {
+        chapters.add(
+          Chapter(id: href, title: heading, blocks: blocks, footnotes: footnotes),
+        );
+      } else {
+        noHeadingIndices.add(chapters.length);
+        noHeadingHtmlTitles[chapters.length] = _htmlTitle(doc) ?? '';
+        chapters.add(
+          Chapter(
+            id: href,
+            title: '第 ${chapters.length + 1} 节',
+            blocks: blocks,
+            footnotes: footnotes,
+          ),
+        );
+      }
     }
 
     // 6. 目录：EPUB3 nav → NCX → 兜底（每章一项目录）
@@ -218,6 +229,32 @@ class EpubParser {
     if (toc.isEmpty) {
       for (var i = 0; i < chapters.length; i++) {
         toc.add(TocEntry(title: chapters[i].title, spineIndex: i));
+      }
+    }
+
+    // 无正文章节（纯插图页/封面页等）标题回填：优先取指向该章章首
+    // （charOffset == 0）的目录条目（如「插图」「序章」），其次 html
+    // `<title>`（如「Cover」），最后保留「第 N 节」
+    for (final i in noHeadingIndices) {
+      TocEntry? best;
+      for (final e in toc) {
+        if (e.spineIndex != i) continue;
+        if (e.charOffset == 0) {
+          best = e;
+          break;
+        }
+        best ??= e;
+      }
+      final tocTitle = best?.title.trim() ?? '';
+      final htmlTitle = noHeadingHtmlTitles[i]?.trim() ?? '';
+      final title = tocTitle.isNotEmpty ? tocTitle : htmlTitle;
+      if (title.isNotEmpty) {
+        chapters[i] = Chapter(
+          id: chapters[i].id,
+          title: title,
+          blocks: chapters[i].blocks,
+          footnotes: chapters[i].footnotes,
+        );
       }
     }
 
@@ -465,6 +502,12 @@ String? _firstHeading(dom.Document doc) {
     if (t.isNotEmpty) return t;
   }
   return null;
+}
+
+/// html `<title>` 兜底（目录无条目的封面页等使用，如「Cover」）
+String? _htmlTitle(dom.Document doc) {
+  final t = doc.head?.querySelector('title')?.text.trim() ?? '';
+  return t.isEmpty ? null : t;
 }
 
 Future<String> _readText(ArchiveFile f) async =>

@@ -445,7 +445,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
       final imgSrc = PageCanvas.hitTestImage(
         laid0,
         laid0.pages[s0.pageIndex],
-        ref.read(readerSettingsProvider).margins,
+        _effMargins,
         d.localPosition,
       );
       if (imgSrc != null && imgSrc.isNotEmpty) {
@@ -1155,7 +1155,6 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
               ('无', 'none'),
               ('覆盖', 'cover'),
               ('平移', 'slide'),
-              ('淡入', 'fade'),
             ])
               Expanded(
                 child: Padding(

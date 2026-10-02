@@ -118,27 +118,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 },
               ),
             ),
-          const _SectionHeader('阅读排版'),
-          ListTile(
-            leading: const Icon(Icons.format_size),
-            title: const Text('默认字号'),
-            subtitle: Text('${settings.fontSize.round()} sp'),
-          ),
-          ListTile(
-            leading: const Icon(Icons.format_line_spacing),
-            title: const Text('默认行距'),
-            subtitle: Text(settings.lineHeight.toStringAsFixed(1)),
-          ),
-          ListTile(
-            leading: const Icon(Icons.format_align_justify),
-            title: const Text('两端对齐'),
-            trailing: Switch(
-              value: settings.justify,
-              onChanged: (v) => ref
-                  .read(readerSettingsProvider.notifier)
-                  .update((s) => s.copyWith(justify: v)),
-            ),
-          ),
           const _SectionHeader('阅读体验'),
           ListTile(
             leading: const Icon(Icons.grain),
@@ -153,7 +132,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           ),
           const _SectionHeader('数据'),
           ListTile(
-            leading: const Icon(Icons.insights_outlined),
+            leading: const Icon(Icons.query_stats),
             title: const Text('阅读统计'),
             subtitle: const Text('每日 / 每周 / 累计阅读时长与历史记录'),
             onTap: () => context.push('/stats'),

@@ -67,11 +67,11 @@ void main() {
       mode: ThemeModeChoice.fixed,
       lightThemeId: 'paper',
       darkThemeId: 'dark',
-      fixedThemeId: 'oled',
+      fixedThemeId: 'sepia',
     );
     // 无论系统明暗，固定模式都应返回固定主题
-    expect(state.resolve(false).id, 'oled');
-    expect(state.resolve(true).id, 'oled');
+    expect(state.resolve(false).id, 'sepia');
+    expect(state.resolve(true).id, 'sepia');
   });
 
   test('ThemeState：JSON 序列化往返保留 fixedThemeId', () {
@@ -96,10 +96,13 @@ void main() {
     expect(restored.resolve(true).id, 'dark');
   });
 
-  test('内置主题：5 套主题 id 唯一且可反查', () {
+  test('内置主题：id 唯一且可反查（墨黑已并入夜间）', () {
     final ids = BuiltinThemes.all.map((t) => t.id).toSet();
     expect(ids.length, BuiltinThemes.all.length);
+    expect(BuiltinThemes.all.where((t) => t.isDark).length, 1);
     expect(BuiltinThemes.byId('dark').isDark, isTrue);
+    // 旧版本「墨黑」设置映射回夜间
+    expect(BuiltinThemes.byId('oled').id, 'dark');
     expect(BuiltinThemes.byId('不存在').id, 'paper');
   });
 }

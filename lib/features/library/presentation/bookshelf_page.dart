@@ -148,12 +148,26 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
         appBar: _selectionMode
             ? _buildSelectionAppBar()
             : AppBar(
-                title: const Text(
-                  'LiteRead',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 2,
-                  ),
+                // 标题下方挂排序切换；顶栏操作区只留高频功能
+                title: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      'LiteRead',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 2,
+                        height: 1.15,
+                      ),
+                    ),
+                    _SortSelector(
+                      current: prefs.sort,
+                      onSelected: (s) => ref
+                          .read(bookshelfPrefsProvider.notifier)
+                          .update((p) => p.copyWith(sort: s)),
+                    ),
+                  ],
                 ),
                 backgroundColor: Colors.transparent,
                 actions: [
@@ -161,27 +175,6 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
                     tooltip: '搜索',
                     icon: const Icon(Icons.search),
                     onPressed: () => _showSearch(context),
-                  ),
-                  PopupMenuButton<BookSort>(
-                    tooltip: '排序',
-                    icon: const Icon(Icons.sort),
-                    onSelected: (s) => ref
-                        .read(bookshelfPrefsProvider.notifier)
-                        .update((p) => p.copyWith(sort: s)),
-                    itemBuilder: (context) => [
-                      const PopupMenuItem(
-                        value: BookSort.lastRead,
-                        child: Text('最近阅读'),
-                      ),
-                      const PopupMenuItem(
-                        value: BookSort.addedAt,
-                        child: Text('添加时间'),
-                      ),
-                      const PopupMenuItem(
-                        value: BookSort.title,
-                        child: Text('书名'),
-                      ),
-                    ],
                   ),
                   IconButton(
                     tooltip: '视图',
@@ -192,7 +185,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
                   ),
                   IconButton(
                     tooltip: '阅读统计',
-                    icon: const Icon(Icons.insights_outlined),
+                    icon: const Icon(Icons.query_stats),
                     onPressed: () => context.push('/stats'),
                   ),
                   IconButton(
@@ -811,6 +804,69 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
       },
     );
     if (keyword != null) setState(() => _keyword = keyword.trim());
+  }
+}
+
+/// 标题下方的排序切换（紧凑下拉，替代顶栏排序按钮）
+class _SortSelector extends StatelessWidget {
+  const _SortSelector({required this.current, required this.onSelected});
+
+  final BookSort current;
+  final ValueChanged<BookSort> onSelected;
+
+  static const _labels = {
+    BookSort.lastRead: '最近阅读',
+    BookSort.addedAt: '添加时间',
+    BookSort.title: '书名',
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return PopupMenuButton<BookSort>(
+      tooltip: '排序方式',
+      onSelected: onSelected,
+      itemBuilder: (context) => [
+        for (final s in BookSort.values)
+          PopupMenuItem(
+            value: s,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  s == current ? Icons.check : Icons.sort,
+                  size: 15,
+                  color: s == current
+                      ? cs.primary
+                      : cs.onSurfaceVariant,
+                ),
+                const SizedBox(width: 6),
+                Text(_labels[s] ?? '', style: const TextStyle(fontSize: 13)),
+              ],
+            ),
+          ),
+      ],
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.sort, size: 13, color: cs.primary),
+            const SizedBox(width: 4),
+            Text(
+              _labels[current] ?? '',
+              style: TextStyle(
+                fontSize: 11,
+                height: 1.2,
+                color: cs.primary,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            Icon(Icons.arrow_drop_down, size: 15, color: cs.primary),
+          ],
+        ),
+      ),
+    );
   }
 }
 
