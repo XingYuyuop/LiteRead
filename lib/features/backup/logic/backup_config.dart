@@ -223,5 +223,12 @@ final lanBootstrapProvider = Provider<void>((ref) {
     } catch (_) {
       // 启动失败静默处理，进入备份页时可再次开启
     }
+    // Windows：启动即校验防火墙放行（规则缺失/程序路径变更时请求一次 UAC）。
+    // 放行是「被其他设备扫描到」的硬前提，不能等用户进备份页才补。
+    try {
+      await LanScanner.ensureWindowsFirewallRule();
+    } catch (_) {
+      // 防火墙检查失败静默（无网络环境/UAC 拒绝时由备份页提示重试）
+    }
   }());
 });

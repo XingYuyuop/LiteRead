@@ -703,7 +703,10 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     if (doc == null || s.spineIndex < 0 || s.spineIndex >= doc.spine.length) {
       return false;
     }
-    final run = doc.spine[s.spineIndex].inlineRunAt(char);
+    final run = doc.spine[s.spineIndex].inlineRunAt(char) ??
+        // 占位角标图（\uFFFC）右半边点击会被映射到其后一个字符，
+        // 回退检查前一个字符的 run 才能命中注标
+        (char > 0 ? doc.spine[s.spineIndex].inlineRunAt(char - 1) : null);
     final refId = run?.refId;
     if (refId == null) return false;
     final fn = _findFootnote(doc, refId, s.spineIndex);

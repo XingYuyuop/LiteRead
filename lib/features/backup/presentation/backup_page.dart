@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -32,6 +33,10 @@ class _BackupPageState extends ConsumerState<BackupPage> {
 
   bool _scanning = false;
   List<LanDevice> _devices = const [];
+
+  /// 持续扫描定时器：局域网页面驻留期间周期性重扫
+  ///（对齐 beacon 发现模式——单轮扫描丢包/对端未就绪时，下一轮补上）
+  Timer? _scanTimer;
 
   /// 本机共享服务是否已开启（进局域网目标时自动开启，无手动开关）
   bool _serverRunning = false;
@@ -77,6 +82,7 @@ class _BackupPageState extends ConsumerState<BackupPage> {
 
   @override
   void dispose() {
+    _scanTimer?.cancel();
     _localPathCtrl.dispose();
     _lanAddrCtrl.dispose();
     _webdavUrlCtrl.dispose();
@@ -511,24 +517,40 @@ class _BackupPageState extends ConsumerState<BackupPage> {
     await _ensureLanServer();
   }
 
-  Future<void> _scanDevices() async {
+  /// 扫描局域网设备。
+  /// [auto]=true 为后台持续扫描轮次：静默（不弹 toast），结束后排下一轮；
+  /// 局域网页面驻留期间每 5 秒重扫一次，设备列表持续刷新。
+  Future<void> _scanDevices({bool auto = false}) async {
+    if (_scanning) return;
     setState(() => _scanning = true);
     try {
       final found = await LanScanner.scan();
       if (!mounted) return;
       setState(() => _devices = found);
-      if (found.isEmpty) {
+      if (found.isEmpty && !auto) {
         _toast(
           '未发现局域网设备：请确认对端已进入「备份」页并选择「局域网设备」'
           '（进入即自动开启共享），且两台设备连同一网络',
         );
       }
     } catch (e) {
-      _toast('扫描失败：$e');
+      if (!auto) _toast('扫描失败：$e');
     } finally {
       if (mounted) {
         setState(() => _scanning = false);
       }
+    }
+    // 排下一轮持续扫描（仅在 LAN 目标下、页面存活、非操作忙碌时）
+    if (mounted && _cfg.type == BackupTargetType.lan && !_busy) {
+      _scanTimer?.cancel();
+      _scanTimer = Timer(const Duration(seconds: 5), () {
+        if (mounted &&
+            _cfg.type == BackupTargetType.lan &&
+            !_busy &&
+            !_scanning) {
+          _scanDevices(auto: true);
+        }
+      });
     }
   }
 

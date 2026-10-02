@@ -285,17 +285,19 @@ class LanScanner {
   }
 
   /// 确保 Windows 防火墙已放行本应用（入站允许规则）。
-  /// 先无提权检查规则是否存在且指向当前程序路径（便携版换目录后旧规则
-  /// 会失效）；不满足时经 UAC 提权重建规则（同名规则 add 前必须 delete）。
+  /// 先无提权检查：程序规则指向当前 exe，或端口规则（TCP/UDP 47816 起）
+  /// 已存在——端口规则不随便携版换目录失效，优先依赖。
+  /// 不满足时经 UAC 提权重建（同名规则 add 前必须 delete）：
+  /// 程序规则 + TCP 端口段规则 + UDP 发现端口规则一次装齐。
   /// 返回 null 表示已放行，否则为失败原因。
   static Future<String?> ensureWindowsFirewallRule() async {
     if (!Platform.isWindows) return null;
     const ruleName = 'LiteRead Sync';
     final exe = Platform.resolvedExecutable;
 
-    /// 检查已有规则是否指向当前程序（必须 verbose 才输出 Program 字段；
-    /// netsh 输出可能按列宽换行，去掉全部空白后比较路径）
-    Future<bool> ruleMatches() async {
+    /// 检查放行规则是否已满足（必须 verbose 才输出 Program/LocalPort 字段；
+    /// netsh 输出可能按列宽换行，去掉全部空白后比较）
+    Future<bool> ruleOk() async {
       final check = await Process.run('netsh', [
         'advfirewall',
         'firewall',
@@ -304,20 +306,26 @@ class LanScanner {
         'name=$ruleName',
         'verbose',
       ]);
-      final flat = (check.stdout as String).replaceAll(RegExp(r'\s'), '');
-      return flat
-          .toLowerCase()
-          .contains(exe.replaceAll(RegExp(r'\s'), '').toLowerCase());
+      final flat = (check.stdout as String)
+          .replaceAll(RegExp(r'\s'), '')
+          .toLowerCase();
+      return flat.contains(exe.replaceAll(RegExp(r'\s'), '').toLowerCase()) ||
+          flat.contains('localport:47816-47825') ||
+          flat.contains('localport:47816');
     }
 
     try {
-      if (await ruleMatches()) return null;
-      // UAC 提权：先 delete 清掉旧路径规则，再 add 当前程序路径
+      if (await ruleOk()) return null;
+      // UAC 提权：先 delete 清掉旧规则，再补程序规则 + 端口规则
       final ps =
           'Start-Process -FilePath cmd -Verb RunAs -Wait -ArgumentList '
           "'/c netsh advfirewall firewall delete rule name=\"$ruleName\" & "
           'netsh advfirewall firewall add rule name="$ruleName" dir=in '
-          'action=allow program="$exe" enable=yes\'';
+          'action=allow program="$exe" enable=yes & '
+          'netsh advfirewall firewall add rule name="$ruleName" dir=in '
+          'action=allow protocol=TCP localport=47816-47825 & '
+          'netsh advfirewall firewall add rule name="$ruleName" dir=in '
+          'action=allow protocol=UDP localport=47816 enable=yes\'';
       final r = await Process.run('powershell', ['-Command', ps]);
       if (r.exitCode != 0) {
         final err = (r.stderr as String?) ?? '';
@@ -327,9 +335,7 @@ class LanScanner {
         return '添加防火墙规则失败：$err';
       }
       // 复验规则确实生效（UAC 同意但 netsh 失败的情况）
-      return await ruleMatches()
-          ? null
-          : '规则添加未生效，请手动在防火墙设置中放行本应用';
+      return await ruleOk() ? null : '规则添加未生效，请手动在防火墙设置中放行本应用';
     } catch (e) {
       return '防火墙检查失败：$e';
     }
