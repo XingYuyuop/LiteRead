@@ -81,19 +81,29 @@ class BookParser {
   /// 性能优化：EPUB/MOBI/MD/TXT 的全量解析（zip 解压 + 逐章 HTML 解析）
   /// 在后台 isolate 执行，避免大文件打开时阻塞 UI 造成「打开慢」。
   /// PDF 依赖 pdfrx 原生插件上下文，保留在主 isolate（本身开销很小）。
-  Future<ParseOutput> parseFile(String path, {List<int>? bytesHint}) async {
+  ///
+  /// [bookCss] 开启后 EPUB/MOBI 解析会提取原书 text-align 对齐。
+  Future<ParseOutput> parseFile(
+    String path, {
+    List<int>? bytesHint,
+    bool bookCss = false,
+  }) async {
     final format = formatFromExtension(path);
     if (format == BookFormat.pdf) return _parseSync(path);
-    return Isolate.run(() => _parseSync(path));
+    return Isolate.run(() => _parseSync(path, bookCss: bookCss));
   }
 
-  Future<ParseOutput> _parseSync(String path, {List<int>? bytesHint}) async {
+  Future<ParseOutput> _parseSync(
+    String path, {
+    List<int>? bytesHint,
+    bool bookCss = false,
+  }) async {
     final bytes = bytesHint ?? await File(path).readAsBytes();
     final format = detectFormat(path, bytes);
 
     switch (format) {
       case BookFormat.epub:
-        final r = await const EpubParser().parse(bytes);
+        final r = await const EpubParser().parse(bytes, bookCss: bookCss);
         return ParseOutput(
           document: r.document,
           format: format,
@@ -122,7 +132,7 @@ class BookParser {
 
       case BookFormat.mobi:
       case BookFormat.azw3:
-        final r = await const MobiParser().parse(bytes);
+        final r = await const MobiParser().parse(bytes, bookCss: bookCss);
         return ParseOutput(
           document: r.document,
           format: format,

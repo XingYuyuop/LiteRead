@@ -18,7 +18,9 @@ class EpubParser {
   static const magicAscii = [0x50, 0x4B]; // 'PK'
 
   /// 解析 [bytes]，返回文档与封面字节。
-  Future<EpubParseResult> parse(List<int> bytes) async {
+  ///
+  /// [bookCss] 开启后提取原书 text-align 对齐（见 HtmlLiteConverter）。
+  Future<EpubParseResult> parse(List<int> bytes, {bool bookCss = false}) async {
     final Archive archive;
     try {
       archive = ZipDecoder().decodeBytes(bytes);
@@ -155,8 +157,7 @@ class EpubParser {
 
     // 5. 逐章解析
     final chapters = <Chapter>[];
-    // 无正文章节（纯插图页等）的 spine 序号：目录解析完成后回填目录标题
-    final noHeadingIndices = <int>[];
+    // 无正文章节（纯插图页等）的 html `<title>`（目录解析完成后兜底回填）
     final noHeadingHtmlTitles = <int, String>{};
     // 每章的 id 锚点表（目录锚点 → 章内字符偏移；与 chapters 同序）
     final anchorMaps = <Map<String, (int, int)>>[];
@@ -175,6 +176,7 @@ class EpubParser {
         doc,
         anchors: anchors,
         footnotesOut: footnotes,
+        bookCss: bookCss,
       );
       anchorMaps.add(anchors);
       // 关键修复：图片 src 相对「章节文件目录」而非 OPF 目录，
@@ -204,7 +206,6 @@ class EpubParser {
           ),
         );
       } else {
-        noHeadingIndices.add(chapters.length);
         noHeadingHtmlTitles[chapters.length] = _htmlTitle(doc) ?? '';
         chapters.add(
           Chapter(
@@ -241,10 +242,14 @@ class EpubParser {
       }
     }
 
-    // 无正文章节（纯插图页/封面页等）标题回填：优先取指向该章章首
-    // （charOffset == 0）的目录条目（如「插图」「序章」），其次 html
-    // `<title>`（如「Cover」），最后保留「第 N 节」
-    for (final i in noHeadingIndices) {
+    // 章节标题回填：凡落到「第 N 节」兜底（无标题块，或标题块提取失败）
+    // 的章节，优先取指向该章章首（charOffset == 0）的目录条目（如
+    // 「插图」「序章」），其次该章第一条目录；仅当目录无条目时，无标题
+    // 章节再退回 html `<title>`（如「Cover」），最后保留「第 N 节」。
+    // 修复阅读页章节名与目录名不一致（目录有名、章名仍显示第 N 节）的 bug
+    final fallbackTitleRe = RegExp(r'^第 \d+ 节$');
+    for (var i = 0; i < chapters.length; i++) {
+      if (!fallbackTitleRe.hasMatch(chapters[i].title)) continue;
       TocEntry? best;
       for (final e in toc) {
         if (e.spineIndex != i) continue;

@@ -20,16 +20,20 @@ class HtmlLiteConverter {
   /// 解析 HTML 字符串并提取块序列
   ///
   /// [anchors]: 元素 id → (块序号, 块内字符偏移)（可选输出）；
-  /// [footnotesOut]: 脚注 id → 内容（可选输出）。
+  /// [footnotesOut]: 脚注 id → 内容（可选输出）；
+  /// [bookCss]: 开启后提取原书 text-align 对齐（inline style / `<style>`
+  /// 简单选择器 / `<center>` / 旧式 align 属性），写入 Block.align。
   List<Block> convert(
     String html, {
     Map<String, (int, int)>? anchors,
     Map<String, Footnote>? footnotesOut,
+    bool bookCss = false,
   }) {
     final doc = html_parser.parse(utf8.decode(utf8.encode(html)));
     final body = doc.body;
     if (body == null) return const [];
-    final ctx = _Ctx();
+    final ctx = _Ctx(bookCss: bookCss);
+    if (bookCss) _collectStyleAligns(doc, ctx);
     _walkChildren(body.nodes, ctx, quoteDepth: 0);
     anchors?.addAll(ctx.anchors);
     footnotesOut?.addAll(ctx.footnotes);
@@ -40,10 +44,12 @@ class HtmlLiteConverter {
     dom.Document doc, {
     Map<String, (int, int)>? anchors,
     Map<String, Footnote>? footnotesOut,
+    bool bookCss = false,
   }) {
     final body = doc.body;
     if (body == null) return const [];
-    final ctx = _Ctx();
+    final ctx = _Ctx(bookCss: bookCss);
+    if (bookCss) _collectStyleAligns(doc, ctx);
     _walkChildren(body.nodes, ctx, quoteDepth: 0);
     anchors?.addAll(ctx.anchors);
     footnotesOut?.addAll(ctx.footnotes);
@@ -52,6 +58,11 @@ class HtmlLiteConverter {
 }
 
 class _Ctx {
+  _Ctx({this.bookCss = false});
+
+  /// 是否提取原书对齐样式（阅读设置 useBookCss 开启时为 true）
+  final bool bookCss;
+
   final List<Block> blocks = [];
 
   /// 元素 id → (块序号, 块内字符偏移)
@@ -59,6 +70,9 @@ class _Ctx {
 
   /// 脚注 id → 内容
   final Map<String, Footnote> footnotes = {};
+
+  /// `<style>` 简单选择器 → 对齐（tag / .class / #id / tag.class）
+  final Map<String, BlockAlign> styleAlign = {};
 }
 
 const _blockTags = {
@@ -106,6 +120,7 @@ void _walkChildren(
   _Ctx ctx, {
   required int quoteDepth,
   int listDepth = 0,
+  BlockAlign align = BlockAlign.start,
 }) {
   var pending = <InlineRun>[];
 
@@ -117,11 +132,22 @@ void _walkChildren(
       if (i == pending.length - 1) t = t.trimRight();
       if (t.isEmpty) continue;
       final f = pending[i];
-      runs.add(InlineRun(t, flags: f.flags, ruby: f.ruby, refId: f.refId));
+      // imageSrc 必须随 run 透传：行内图片（注标角标图/段内插图）的
+      // text 是对象占位符 U+FFFC，丢失 imageSrc 后会被当普通文本绘制，
+      // 在多数字体下显示为「OBJ」字形
+      runs.add(
+        InlineRun(
+          t,
+          flags: f.flags,
+          ruby: f.ruby,
+          refId: f.refId,
+          imageSrc: f.imageSrc,
+        ),
+      );
     }
     pending = <InlineRun>[];
     if (runs.any((r) => r.text.trim().isNotEmpty)) {
-      ctx.blocks.add(_paragraphOf(runs, quoteDepth));
+      ctx.blocks.add(_paragraphOf(runs, quoteDepth, align));
     }
   }
 
@@ -148,7 +174,13 @@ void _walkChildren(
       flush();
       // 块级锚点：定位到该元素生成的下一个块（通常是它本身）的块首
       _recordAnchor(child, ctx, 0);
-      _walkBlock(child, ctx, quoteDepth: quoteDepth, listDepth: listDepth);
+      _walkBlock(
+        child,
+        ctx,
+        quoteDepth: quoteDepth,
+        listDepth: listDepth,
+        align: _childAlign(child, ctx, align),
+      );
     } else {
       // 行内锚点：定位到当前累积段落的块内偏移
       _recordAnchor(child, ctx, _pendingLen(pending));
@@ -173,6 +205,7 @@ void _walkBlock(
   _Ctx ctx, {
   required int quoteDepth,
   int listDepth = 0,
+  BlockAlign align = BlockAlign.start,
 }) {
   final tag = node.localName?.toLowerCase() ?? '';
 
@@ -209,6 +242,7 @@ void _walkBlock(
             type: BlockType.heading,
             spans: [InlineRun(text)],
             headingLevel: int.parse(tag.substring(1)),
+            align: _elementAlign(node, ctx) ?? align,
           ),
         );
       }
@@ -221,6 +255,7 @@ void _walkBlock(
             type: BlockType.image,
             spans: const [],
             imageSrc: _resolveSrc(src),
+            align: _elementAlign(node, ctx) ?? align,
           ),
         );
       }
@@ -233,6 +268,7 @@ void _walkBlock(
             type: BlockType.image,
             spans: const [],
             imageSrc: _resolveSrc(href),
+            align: _elementAlign(node, ctx) ?? align,
           ),
         );
       }
@@ -243,8 +279,23 @@ void _walkBlock(
     case 'br':
       // 行内换行在块级上下文当作段落边界
       return;
+    case 'center':
+      // 旧式居中容器：内部所有块居中
+      _walkChildren(
+        node.nodes,
+        ctx,
+        quoteDepth: quoteDepth,
+        listDepth: listDepth,
+        align: BlockAlign.center,
+      );
+      return;
     case 'blockquote':
-      _walkChildren(node.nodes, ctx, quoteDepth: quoteDepth + 1);
+      _walkChildren(
+        node.nodes,
+        ctx,
+        quoteDepth: quoteDepth + 1,
+        align: align,
+      );
       return;
     case 'ul':
       var i = 0;
@@ -301,6 +352,7 @@ void _walkBlock(
         ctx,
         quoteDepth: quoteDepth,
         listDepth: listDepth,
+        align: align,
       );
       return;
     case 'script':
@@ -319,6 +371,7 @@ void _walkBlock(
       ctx,
       quoteDepth: quoteDepth,
       listDepth: listDepth,
+      align: align,
     );
     return;
   }
@@ -410,8 +463,13 @@ Block _listItemBlock(
   );
 }
 
-Block _paragraphOf(List<InlineRun> runs, int quoteDepth) =>
-    Block(type: BlockType.paragraph, spans: runs, quoteDepth: quoteDepth);
+Block _paragraphOf(List<InlineRun> runs, int quoteDepth, BlockAlign align) =>
+    Block(
+      type: BlockType.paragraph,
+      spans: runs,
+      quoteDepth: quoteDepth,
+      align: align,
+    );
 
 /// `<a>` 是否为注标：epub:type="noteref" 或 class 含 noteref/fnref 标识。
 /// 是则返回目标脚注 id（href 锚点，不含 #）；跨文件注标同样取其锚点，
@@ -569,4 +627,100 @@ String? _resolveSrc(String src) {
   if (src.startsWith('data:')) return null; // data URI 暂不支持
   final i = src.indexOf('#');
   return (i > 0 ? src.substring(0, i) : src).trim();
+}
+
+// ---- 原书对齐样式提取（bookCss 模式下启用） ----
+
+final _textAlignRe = RegExp(
+  r'text-align\s*:\s*([a-z\-]+)',
+  caseSensitive: false,
+);
+final _cssRuleRe = RegExp(r'([^{}]+)\{([^{}]*)\}');
+
+/// 块级子元素的对齐：`<center>` 强制居中；否则元素自身规则覆盖继承
+BlockAlign _childAlign(dom.Element el, _Ctx ctx, BlockAlign inherited) {
+  if ((el.localName?.toLowerCase() ?? '') == 'center') {
+    return BlockAlign.center;
+  }
+  return _elementAlign(el, ctx) ?? inherited;
+}
+
+/// 收集 `<style>` 中简单选择器的 text-align 规则
+/// （仅支持 tag / .class / #id / tag.class，组合与伪类选择器忽略）
+void _collectStyleAligns(dom.Document doc, _Ctx ctx) {
+  void walk(dom.Node n) {
+    if (n is! dom.Element) return;
+    if ((n.localName?.toLowerCase() ?? '') == 'style') {
+      for (final m in _cssRuleRe.allMatches(n.text)) {
+        final am = _textAlignRe.firstMatch(m.group(2) ?? '');
+        if (am == null) continue;
+        final align = _normalizeAlign(am.group(1) ?? '');
+        if (align == null) continue;
+        for (final raw in (m.group(1) ?? '').split(',')) {
+          final sel = raw.trim().toLowerCase();
+          if (sel.isEmpty) continue;
+          if (sel.contains(RegExp(r'[\s>:~+,\[(]'))) {
+            continue; // 后代/伪类等复杂选择器不支持
+          }
+          ctx.styleAlign[sel] = align;
+        }
+      }
+      return;
+    }
+    for (final c in n.nodes) {
+      walk(c);
+    }
+  }
+
+  for (final c in doc.nodes) {
+    walk(c);
+  }
+}
+
+/// text-align 值 → BlockAlign；left/justify 是软件默认行为，映射为 start
+BlockAlign? _normalizeAlign(String raw) {
+  switch (raw.trim().toLowerCase()) {
+    case 'center':
+      return BlockAlign.center;
+    case 'right':
+    case 'end':
+      return BlockAlign.right;
+    case 'left':
+    case 'start':
+    case 'justify':
+      return BlockAlign.start;
+    default:
+      return null;
+  }
+}
+
+/// 元素自身声明的对齐（inline style > 旧式 align 属性 > CSS 规则），
+/// 无声明返回 null（沿用继承的对齐上下文）
+BlockAlign? _elementAlign(dom.Element el, _Ctx ctx) {
+  if (!ctx.bookCss) return null;
+  final style = el.attributes['style'];
+  if (style != null) {
+    final m = _textAlignRe.firstMatch(style);
+    if (m != null) return _normalizeAlign(m.group(1) ?? '');
+  }
+  final legacy = el.attributes['align']?.trim().toLowerCase();
+  if (legacy != null && legacy.isNotEmpty) {
+    final a = _normalizeAlign(legacy);
+    if (a != null) return a;
+  }
+  final id = el.attributes['id'];
+  if (id != null && id.isNotEmpty) {
+    final a = ctx.styleAlign['#$id'];
+    if (a != null) return a;
+  }
+  final tag = (el.localName ?? '').toLowerCase();
+  final classes = (el.attributes['class'] ?? '')
+      .toLowerCase()
+      .split(RegExp(r'\s+'))
+      .where((c) => c.isNotEmpty);
+  for (final c in classes) {
+    final a = ctx.styleAlign['$tag.$c'] ?? ctx.styleAlign['.$c'];
+    if (a != null) return a;
+  }
+  return ctx.styleAlign[tag];
 }

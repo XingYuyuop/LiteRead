@@ -17,7 +17,8 @@ import 'html_lite_converter.dart';
 class MobiParser {
   const MobiParser();
 
-  Future<MobiParseResult> parse(List<int> bytes) async {
+  /// [bookCss] 开启后提取原书 text-align 对齐（见 HtmlLiteConverter）。
+  Future<MobiParseResult> parse(List<int> bytes, {bool bookCss = false}) async {
     if (bytes.length < 80) {
       throw const BookParseException('MOBI 文件损坏：长度不足');
     }
@@ -177,7 +178,7 @@ class MobiParser {
     final converter = const HtmlLiteConverter();
     final chapters = <Chapter>[];
     for (var i = 0; i < parts.length; i++) {
-      final blocks = converter.convert(parts[i]);
+      final blocks = converter.convert(parts[i], bookCss: bookCss);
       if (blocks.isEmpty) continue;
       String? title;
       for (final b in blocks) {
@@ -223,6 +224,30 @@ class MobiParser {
       }
       if (!added) {
         toc.add(TocEntry(title: c.title, spineIndex: i));
+      }
+    }
+
+    // 章节标题回填：章名只认 h1-h2 标题块，仅含 h3-h6 标题的章会落到
+    // 「第 N 节」兜底，而目录条目包含全部标题块 → 章名与目录名不一致。
+    // 此处用该章第一条目录条目（按章内偏移排序的首个标题）回填章名。
+    // 修复阅读页章节名显示「第 N 节」而目录显示实际标题的 bug
+    final fallbackTitleRe = RegExp(r'^第 \d+ 节$');
+    for (var i = 0; i < chapters.length; i++) {
+      if (!fallbackTitleRe.hasMatch(chapters[i].title)) continue;
+      TocEntry? first;
+      for (final e in toc) {
+        if (e.spineIndex == i) {
+          first = e;
+          break;
+        }
+      }
+      final t = first?.title.trim() ?? '';
+      if (t.isNotEmpty && t != chapters[i].title) {
+        chapters[i] = Chapter(
+          id: chapters[i].id,
+          title: t,
+          blocks: chapters[i].blocks,
+        );
       }
     }
 

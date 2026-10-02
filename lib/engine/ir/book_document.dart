@@ -42,6 +42,10 @@ class InlineRun {
 /// 块级元素类型（HTML-lite 白名单子集）
 enum BlockType { paragraph, heading, image, blockquote, listItem, code, hr }
 
+/// 块级对齐：原书 CSS `text-align` 的提取结果（仅「原书样式」开启时
+/// 由解析器填充；软件样式下恒为 [BlockAlign.start]，渲染不变）
+enum BlockAlign { start, center, right }
+
 /// 块级元素：排版引擎的最小处理单元（段落级）。
 class Block {
   const Block({
@@ -51,6 +55,7 @@ class Block {
     this.imageSrc,
     this.listMarker,
     this.quoteDepth = 0,
+    this.align = BlockAlign.start,
   });
 
   final BlockType type;
@@ -70,16 +75,20 @@ class Block {
   /// 引用嵌套深度
   final int quoteDepth;
 
+  /// 原书 CSS 对齐（text-align: center/right；start = 默认排版）
+  final BlockAlign align;
+
   /// 本块的纯文本（Locator 偏移计算依据，与排版无关）
   String get plainText => spans.map((s) => s.text).join();
 
-  Block copyWith({String? imageSrc}) => Block(
+  Block copyWith({String? imageSrc, BlockAlign? align}) => Block(
     type: type,
     spans: spans,
     headingLevel: headingLevel,
     imageSrc: imageSrc ?? this.imageSrc,
     listMarker: listMarker,
     quoteDepth: quoteDepth,
+    align: align ?? this.align,
   );
 }
 

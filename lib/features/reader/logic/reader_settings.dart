@@ -32,6 +32,7 @@ class ReaderSettings {
     this.cornerTopRight = 0,
     this.cornerBottomLeft = 4,
     this.cornerBottomRight = 3,
+    this.useBookCss = false,
   });
 
   final double fontSize; // 12–36
@@ -62,6 +63,10 @@ class ReaderSettings {
   final int cornerBottomLeft;
   final int cornerBottomRight;
 
+  /// 原书样式：开启后 EPUB/MOBI 解析提取原书 text-align 对齐
+  /// （居中/右对齐；需重新解析书籍生效）。false = 统一软件排版。
+  final bool useBookCss;
+
   EdgeInsets get margins =>
       EdgeInsets.fromLTRB(marginLeft, marginTop, marginRight, marginBottom);
 
@@ -87,6 +92,7 @@ class ReaderSettings {
     int? cornerTopRight,
     int? cornerBottomLeft,
     int? cornerBottomRight,
+    bool? useBookCss,
   }) {
     return ReaderSettings(
       fontSize: fontSize ?? this.fontSize,
@@ -109,6 +115,7 @@ class ReaderSettings {
       cornerTopRight: cornerTopRight ?? this.cornerTopRight,
       cornerBottomLeft: cornerBottomLeft ?? this.cornerBottomLeft,
       cornerBottomRight: cornerBottomRight ?? this.cornerBottomRight,
+      useBookCss: useBookCss ?? this.useBookCss,
     );
   }
 
@@ -133,6 +140,7 @@ class ReaderSettings {
     'cornerTopRight': cornerTopRight,
     'cornerBottomLeft': cornerBottomLeft,
     'cornerBottomRight': cornerBottomRight,
+    'useBookCss': useBookCss,
   };
 
   static ReaderSettings fromJson(Map<String, dynamic> j) => ReaderSettings(
@@ -156,6 +164,7 @@ class ReaderSettings {
     cornerTopRight: j['cornerTopRight'] as int? ?? 0,
     cornerBottomLeft: j['cornerBottomLeft'] as int? ?? 4,
     cornerBottomRight: j['cornerBottomRight'] as int? ?? 3,
+    useBookCss: j['useBookCss'] as bool? ?? false,
   );
 }
 

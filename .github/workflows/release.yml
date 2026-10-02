@@ -1,12 +1,14 @@
 name: release
 
 # 计划书 §7.3：云端打包发布（语义化版本规范见 docs/VERSIONING.md）
-# 两条触发路径：
-#   1. push tag v*        → 正式版（stable）：以 tag 版本为准
-#   2. workflow_dispatch  → stable：以 pubspec.yaml 当前版本发布；beta：当前版本 + -beta.N
+# 三条触发路径：
+#   1. push main          → 自动发布（stable）：版本号 patch 自动 +1 后构建发布
+#   2. push tag v*        → 正式版（stable）：以 tag 版本为准
+#   3. workflow_dispatch  → stable：以 pubspec.yaml 当前版本发布；beta：当前版本 + -beta.N
 # 版本号规则：严格语义化 X.Y.Z（0..9 每位，上限 9.9.9），pubspec.yaml 为唯一版本源。
 on:
   push:
+    branches: [main]
     tags: ['v*']
   workflow_dispatch:
     inputs:
@@ -21,34 +23,87 @@ defaults:
     shell: bash
 
 jobs:
-  # 统一解析版本号与通道，供所有构建任务共用
+  # 统一解析版本号与通道，供所有构建任务共用。
+  # push main 时在本任务内完成版本号 bump（patch +1，[skip ci] 防循环），
+  # 构建与发布均以 bump 后的提交为准（sha 输出）。
   meta:
     runs-on: ubuntu-latest
+    permissions: { contents: write }
     outputs:
       version: ${{ steps.ver.outputs.version }}
       channel: ${{ steps.ver.outputs.channel }}
       prerelease: ${{ steps.ver.outputs.prerelease }}
+      sha: ${{ steps.ver.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - id: ver
         env:
           EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
           CH: ${{ inputs.channel }}
         run: |
           set -e
-          # pubspec.yaml 中的语义化版本（唯一版本源）
-          V=$(grep -E '^version:' pubspec.yaml | sed 's/version: *//; s/[^0-9.].*//')
-          if ! echo "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::pubspec.yaml 版本号必须是 X.Y.Z 语义化格式，当前为：$V"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          read_version() {
+            grep -E '^version:' pubspec.yaml | sed 's/version: *//; s/[^0-9.].*//'
+          }
+          check_version() {
+            local V="$1"
+            if ! echo "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::pubspec.yaml 版本号必须是 X.Y.Z 语义化格式，当前为：$V"
+              exit 1
+            fi
+            if [ "$(echo "$V" | awk -F. '{print ($1>9)||($2>9)||($3>9)}')" = "1" ]; then
+              echo "::error::版本号 $V 超出上限 9.9.9"
+              exit 1
+            fi
+          }
+          # patch +1（1.0.9 → 1.1.0），上限 9.9.9
+          next_version() {
+            echo "$1" | awk -F. '{
+              z = $3 + 1; y = $2; x = $1;
+              if (z > 9) { z = 0; y++ }
+              if (y > 9) { y = 0; x++ }
+              if (x > 9) { print "MAXED"; exit }
+              printf "%d.%d.%d", x, y, z
+            }'
+          }
+
+          if [ "$EVENT" = "push" ] && [ "$REF" = "refs/heads/main" ]; then
+            # ---- 自动发布：版本号 bump（并发推送冲突时重试） ----
+            for attempt in 1 2 3; do
+              V=$(read_version)
+              check_version "$V"
+              NEXT=$(next_version "$V")
+              if [ "$NEXT" = "MAXED" ]; then
+                echo "::error::版本已达上限 9.9.9，请人工评估后重置版本号"
+                exit 1
+              fi
+              sed -i "s/^version: .*/version: $NEXT+${GITHUB_RUN_NUMBER}/" pubspec.yaml
+              git add pubspec.yaml
+              git commit -m "chore(version): bump to v$NEXT [skip ci]"
+              if git push; then
+                echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+                echo "channel=stable" >> "$GITHUB_OUTPUT"
+                echo "prerelease=false" >> "$GITHUB_OUTPUT"
+                echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              # push 失败：他人在此期间推送过，重放 rebase 后重算
+              git reset --hard HEAD~1
+              git pull --rebase origin main
+              sleep $((RANDOM % 5 + 1))
+            done
+            echo "::error::版本号 bump 连续 3 次失败（并发推送冲突），请重跑流水线"
             exit 1
-          fi
-          # 上限 9.9.9 校验
-          if [ "$(echo "$V" | awk -F. '{print ($1>9)||($2>9)||($3>9)}')" = "1" ]; then
-            echo "::error::版本号 $V 超出上限 9.9.9"
-            exit 1
-          fi
-          if [ "$EVENT" = "push" ]; then
-            # tag 触发：tag 版本必须与 pubspec 一致（保证可追溯）
+          elif [ "$EVENT" = "push" ]; then
+            # ---- tag 触发：tag 版本必须与 pubspec 一致（保证可追溯） ----
+            V=$(read_version)
+            check_version "$V"
             TAG_V="${GITHUB_REF_NAME#v}"
             if [ "$TAG_V" != "$V" ]; then
               echo "::error::tag 版本（$TAG_V）与 pubspec.yaml 版本（$V）不一致，请对齐后再发布"
@@ -57,14 +112,21 @@ jobs:
             echo "version=$V" >> "$GITHUB_OUTPUT"
             echo "channel=stable" >> "$GITHUB_OUTPUT"
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
           elif [ "$CH" = "stable" ]; then
+            V=$(read_version)
+            check_version "$V"
             echo "version=$V" >> "$GITHUB_OUTPUT"
             echo "channel=stable" >> "$GITHUB_OUTPUT"
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
           else
+            V=$(read_version)
+            check_version "$V"
             echo "version=${V}-beta.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
             echo "channel=beta" >> "$GITHUB_OUTPUT"
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
           fi
 
   build-android:
@@ -75,12 +137,14 @@ jobs:
       KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.sha }}
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17' }
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version: 3.44.6 # 与 ci.yml 保持一致
+          flutter-version: 3.44.6
           cache: true
       - run: flutter pub get
       - run: flutter test
@@ -95,10 +159,9 @@ jobs:
             echo "keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}"
           } > android/key.properties
       # 版本号以 meta 解析结果为准（覆盖 pubspec），build-number 用流水线序号保证单调
-      # 仅构建 arm64/arm32：发布产物只含 v8a/v7a（省去 AAB 与 x86_64 的构建时间）
+      # 按 ABI 拆分构建全部平台（arm64-v8a / armeabi-v7a / x86_64）
       - run: >-
           flutter build apk --release --split-per-abi
-          --target-platform android-arm,android-arm64
           --build-name=${{ needs.meta.outputs.version }}
           --build-number=${{ github.run_number }}
       - name: 重命名产物（带版本号）
@@ -110,6 +173,15 @@ jobs:
             mv "$f" "LiteRead-${VERSION}-$(echo "$f" | sed 's/^app-//;s/-release\.apk$//').apk"
           done
           cp ./*.apk /tmp/dist/
+      # AAB（Play 商店格式）：全 ABI，签名与 APK 相同（key.properties）
+      - run: >-
+          flutter build appbundle --release
+          --build-name=${{ needs.meta.outputs.version }}
+          --build-number=${{ github.run_number }}
+      - name: 收集 AAB
+        run: |
+          VERSION=${{ needs.meta.outputs.version }}
+          cp build/app/outputs/bundle/release/app-release.aab "/tmp/dist/LiteRead-${VERSION}.aab"
       - uses: actions/upload-artifact@v4
         with:
           name: android-out
@@ -120,6 +192,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.sha }}
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -147,7 +221,9 @@ jobs:
     steps:
       # 完整历史（含 tags）：用于生成「上个版本以来」的更新日志
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          ref: ${{ needs.meta.outputs.sha }}
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with: { path: dist }
       - name: 打包 Windows 便携 zip（扁平结构：解压直接呈现应用文件）
@@ -159,6 +235,10 @@ jobs:
           cd ../..
       - name: 汇总产物
         run: cp dist/android-out/* dist/release/
+      - name: 生成 SHA256SUMS.txt
+        run: |
+          cd dist/release
+          sha256sum LiteRead-*.zip LiteRead-*.apk LiteRead-*.aab > SHA256SUMS.txt
       - name: 构建 Release 说明（仅编号式更新日志）
         run: |
           {
@@ -166,8 +246,7 @@ jobs:
             # → 去 type 前缀（如 feat:）与「vX.Y.Z——」版本前缀
             # → 按「、」「；」拆成独立条目（sed 处理多字节安全；tr 按字节拆会破坏 UTF-8）
             # → 去首尾空白、滤空行 → 以「1. 2. …」编号列出
-            PREV=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null \
-              || git describe --tags --abbrev=0 HEAD 2>/dev/null || true)
+            PREV=$(git describe --tags --abbrev=0 "${{ needs.meta.outputs.sha }}" 2>/dev/null || true)
             changelog() {
               grep -v '^chore' \
                 | sed 's/^[a-zA-Z][a-zA-Z]*\(([^)]*)\)\{0,1\}: *//; s/^v[0-9][0-9.]*—— *//' \
@@ -177,7 +256,7 @@ jobs:
                 | awk '{printf "%d. %s\n", NR, $0}'
             }
             if [ -n "$PREV" ]; then
-              git log --pretty=format:'%s' "$PREV..HEAD" | changelog
+              git log --pretty=format:'%s' "$PREV..${{ needs.meta.outputs.sha }}" | changelog
             else
               git log --pretty=format:'%s' -8 | changelog
             fi
@@ -185,6 +264,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.meta.outputs.version }}
+          target_commitish: ${{ needs.meta.outputs.sha }}
           name: v${{ needs.meta.outputs.version }}
           files: dist/release/**
           prerelease: ${{ needs.meta.outputs.prerelease }}

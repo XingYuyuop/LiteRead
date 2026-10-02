@@ -513,7 +513,10 @@ class TextPaginator {
       listIndent = 0.0;
     }
 
-    if (block.type == BlockType.paragraph && cfg.indentChars > 0) {
+    // 原书样式居中/右对齐的段落不加首行缩进（居中排版惯例，缩进会破坏居中）
+    if (block.type == BlockType.paragraph &&
+        cfg.indentChars > 0 &&
+        block.align == BlockAlign.start) {
       // 缩进前缀用透明 CJK 字形而非全角空格（U+3000）：
       // U+3000 属空白字符，两端对齐时会被对齐算法拉伸，
       // 导致缩进宽度随每行剩余空间变化（缩进忽大忽小）；
@@ -590,10 +593,14 @@ class TextPaginator {
         ),
       ),
       textDirection: TextDirection.ltr,
-      // 两端对齐由逐行 painter（_buildJustifiedLines）实现：块级 painter
-      // 恒为左对齐，只负责断行与坐标映射（内建 justify 只拉伸空格，
-      // 中文行右缘参差；字级均布才能右缘对齐，借鉴 legado TextColumn）
-      textAlign: TextAlign.left,
+      // 两端对齐由逐行 painter（_buildJustifiedLines）实现（字级均布，
+      // 借鉴 legado TextColumn）；原书样式指定居中/右对齐的块改用
+      // 块级 painter 内建对齐，此时不启用逐行两端对齐
+      textAlign: switch (block.align) {
+        BlockAlign.start => TextAlign.left,
+        BlockAlign.center => TextAlign.center,
+        BlockAlign.right => TextAlign.right,
+      },
       // 强制等高 strut：行高不再随行内字符（中文/西文/数字/表情等回退字体）变化。
       // 否则西文字体回退会让某些行高 2–3px，整页累积后末行位置忽上忽下；
       // 固定后每行高度恒为 fontSize × height，页末行始终落在同一网格线上。
@@ -674,9 +681,9 @@ class TextPaginator {
     );
 
     // 段前间距：标题前更大；正文段落取 paragraphSpacing × 整行高
-    // （默认 0.85 行，配合 1.65 行距达到舒适的阅读密度）。
-    // 行网格量化：段前距对齐到整数行——正文行高已由 strut 恒定，
-    // 量化后每页可容纳的行槽数固定，页首/页尾版面整齐（固定每页行数）
+    // （默认 0.85 行，量化后为 1 个半行槽，配合 1.65 行距达到舒适的阅读密度）。
+    // 行网格量化：段前距对齐到半行槽——正文行高已由 strut 恒定，
+    // 量化后段前距不挤占正文行位（页首/页尾版面整齐）
     double spaceAbove;
     final spacingUnit = cfg.fontSize * cfg.lineHeight;
     switch (block.type) {
@@ -772,6 +779,8 @@ class TextPaginator {
     required List<String> fontFallbacks,
   }) {
     if (!cfg.justify) return null;
+    // 原书样式居中/右对齐的块不参与两端对齐（居中行拉伸会破坏版式）
+    if (block.align != BlockAlign.start) return null;
     switch (block.type) {
       case BlockType.paragraph:
       case BlockType.blockquote:
@@ -901,14 +910,17 @@ class TextPaginator {
     }
   }
 
-  /// 行网格量化：[v] 对齐到标准行高（fontSize×lineHeight）的整数倍。
-  /// 正文行高已由 forceStrutHeight 恒定，段前距向下取整到整数行槽：
-  /// 段前距不得挤占正文行位（保证每页文本行数恒定、页底对齐）；
+  /// 行网格量化：[v] 对齐到半行槽（fontSize×lineHeight 的一半）的整数倍。
+  /// 正文行高已由 forceStrutHeight 恒定；半行槽取整（而非整行向下取整）
+  /// 让段距 0–2 的滑档有 0/0.5/1/1.5/2 五级平滑过渡——旧实现整行向下
+  /// 取整时 0.9 与 0 同样无段前距、1.0 直接跳到整行，档位差异过大。
+  /// 段前距不得挤占正文行位（页首/页尾版面仍保持行槽对齐）；
   /// 取整后为 0 时段落紧邻，以首行缩进区分段落（标准书版式）。
   static double _snapSlot(double v, LayoutConfig cfg) {
     final slot = cfg.fontSize * cfg.lineHeight;
     if (v <= 0 || slot <= 0) return 0;
-    return (v / slot).floorToDouble() * slot;
+    final half = slot / 2;
+    return (v / half).roundToDouble() * half;
   }
 
   LaidOutBlock _measureImage(

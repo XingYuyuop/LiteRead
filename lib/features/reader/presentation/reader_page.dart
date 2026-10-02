@@ -520,7 +520,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
   }
 
   /// 全书搜索：大小写不敏感，逐章扫描（章间让出事件循环防卡顿），
-  /// 命中上限 [_searchLimit] 条。完成后跳到第一条命中。
+  /// 命中上限 [_searchLimit] 条。完成后不高亮跳转：阅读位置保持不变，
+  /// 仅当用户点按结果列表或 F3/上下条按钮时才跳转对应位置。
   Future<void> _runSearch(String query) async {
     final q = query.trim();
     final doc = ref.read(readerControllerProvider).document;
@@ -555,7 +556,6 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
       _searchIndex = hits.isEmpty ? -1 : 0;
       _searching = false;
     });
-    if (hits.isNotEmpty) _gotoHit(0);
   }
 
   /// 命中上下文摘要（前后各取若干字符）
@@ -1943,10 +1943,52 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
                 ),
               ],
             ),
+            // 原书样式开关：仅 EPUB/MOBI/AZW3 显示（TXT/MD/PDF 无原书 CSS）
+            if (_bookSupportsBookCss()) ...[
+              const SizedBox(height: 4),
+              Row(
+                children: [
+                  SizedBox(width: 64, child: Text('样式', style: labelStyle)),
+                  Expanded(
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: ChoiceChip(
+                            label: const Center(child: Text('软件样式')),
+                            selected: !settings.useBookCss,
+                            showCheckmark: false,
+                            visualDensity: VisualDensity.compact,
+                            onSelected: (_) =>
+                                ctl.update((s) => s.copyWith(useBookCss: false)),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: ChoiceChip(
+                            label: const Center(child: Text('原书样式')),
+                            selected: settings.useBookCss,
+                            showCheckmark: false,
+                            visualDensity: VisualDensity.compact,
+                            onSelected: (_) =>
+                                ctl.update((s) => s.copyWith(useBookCss: true)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ],
         ),
       ),
     );
+  }
+
+  /// 当前书是否支持原书样式（EPUB/MOBI/AZW3 有 HTML 源与 CSS 对齐信息）
+  bool _bookSupportsBookCss() {
+    final fmt = ref.read(readerControllerProvider).book?.format;
+    return fmt != null && const {'epub', 'mobi', 'azw3'}.contains(fmt);
   }
 }
 

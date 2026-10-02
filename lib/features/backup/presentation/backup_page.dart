@@ -528,7 +528,10 @@ class _BackupPageState extends ConsumerState<BackupPage> {
       final device = await LanStorePing.ping(host, port);
       if (!mounted) return;
       if (device == null) {
-        _toast('连接失败：$host 未响应，请确认对端已开启共享且地址正确');
+        _toast(
+          '连接失败：$host 未响应。\n请确认对端已开启「共享本机书库」且地址正确，'
+          '两台设备连同一网络${Platform.isWindows ? '，或尝试「防火墙放行」' : ''}',
+        );
         return;
       }
       await _confirmSyncWithDevice(device);
@@ -557,13 +560,29 @@ class _BackupPageState extends ConsumerState<BackupPage> {
   /// 点按设备：读取对端清单 → 弹出同步确认对话框 → 执行确认的动作
   Future<void> _confirmSyncWithDevice(LanDevice d) async {
     final svc = ref.read(backupServiceProvider);
-    // 记住选中设备（「同步」按钮也可对它使用）
-    _update((c) => c.copyWith(lanAddress: d.address, lanPort: d.port));
 
     setState(() {
       _busy = true;
       _busyText = '连接 ${d.name}…';
     });
+    // 连接前地址仲裁：原地址不通时自动换用对端上报的其他网卡地址
+    //（多网卡/VPN/热点场景下扫描应答源地址可能不可达，其他地址仍可连）
+    final reachable = await LanScanner.resolveReachable(d);
+    if (reachable != null) d = reachable;
+    if (!mounted) return;
+    if (reachable == null) {
+      setState(() => _busy = false);
+      _toast(
+        '连接 ${d.name} 失败：设备无响应。\n请确认两台设备连同一网络、'
+        '对端已开启「共享本机书库」'
+        '${Platform.isWindows ? '，Windows 端请尝试「防火墙放行」' : ''}',
+      );
+      return;
+    }
+
+    // 记住选中设备（「同步」按钮也可对它使用）
+    _update((c) => c.copyWith(lanAddress: d.address, lanPort: d.port));
+
     LanDiff? diff;
     LanStore? store;
     try {
@@ -573,7 +592,7 @@ class _BackupPageState extends ConsumerState<BackupPage> {
     } catch (e) {
       await store?.dispose();
       if (mounted) setState(() => _busy = false);
-      _toast('连接设备失败：$e');
+      _toast(lanConnectErrorText(e));
       return;
     }
     if (!mounted) {

@@ -156,7 +156,10 @@ class ReaderController extends Notifier<ReaderState> {
         state = state.copyWith(loading: false, error: '书籍不存在（可能已被删除）');
         return;
       }
-      final output = await const BookParser().parseFile(book.filePath);
+      final output = await const BookParser().parseFile(
+        book.filePath,
+        bookCss: ref.read(readerSettingsProvider).useBookCss,
+      );
       if (session != _session) return;
       state = state.copyWith(
         book: book,
@@ -458,6 +461,16 @@ class ReaderController extends Notifier<ReaderState> {
   // ---- 排版变更 ----
 
   void _onSettingsChanged(ReaderSettings prev, ReaderSettings next) {
+    // 原书样式开关：对齐在解析期写入 IR，需重新打开书籍生效
+    // （open 会先落盘当前进度再重解析；仅对支持原书样式的格式处理）
+    if (prev.useBookCss != next.useBookCss) {
+      final book = state.book;
+      if (book != null &&
+          const {'epub', 'mobi', 'azw3'}.contains(book.format)) {
+        unawaited(open(book.id));
+        return;
+      }
+    }
     final affectsLayout =
         prev.fontSize != next.fontSize ||
         prev.lineHeight != next.lineHeight ||
