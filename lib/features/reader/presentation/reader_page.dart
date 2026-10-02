@@ -233,9 +233,6 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
                 ),
               ),
             ),
-            // 四角信息（时间/电量/进度/页码等，可自定义）
-            if (settings.showStatusBar && state.document != null)
-              _buildCornerOverlay(state, settings, spec),
             // 菜单浮层
             if (_menuVisible) _buildMenu(state, settings, spec, isDark),
             // 批注操作条（划词选择中 / 编辑已有批注）
@@ -387,21 +384,33 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
         }
         final pageIdx = s.pageIndex.clamp(0, chapterLaid.pages.length - 1);
         final page = chapterLaid.pages[pageIdx];
-        return PageCanvas(
-          key: ValueKey('p-${s.spineIndex}-$pageIdx-${chapterLaid.hashCode}'),
-          laid: chapterLaid,
-          page: page,
-          theme: spec,
-          margins: _effMargins,
-          resources: doc.resources,
-          marks: _marksFor(s.spineIndex, page),
-          selection: _selecting
-              ? (
-                  _selStart! < _selEnd! ? _selStart! : _selEnd!,
-                  _selStart! < _selEnd! ? _selEnd! : _selStart!,
-                )
-              : null,
+        // 四角信息（时间/电量/进度/页码等）作为页面内容的一部分：
+        // 翻页时随页面一起移动，动画观感与正文完全一致
+        final pageContent = Stack(
+          children: [
+            Positioned.fill(
+              child: PageCanvas(
+                key: ValueKey(
+                  'p-${s.spineIndex}-$pageIdx-${chapterLaid.hashCode}',
+                ),
+                laid: chapterLaid,
+                page: page,
+                theme: spec,
+                margins: _effMargins,
+                resources: doc.resources,
+                marks: _marksFor(s.spineIndex, page),
+                selection: _selecting
+                    ? (
+                        _selStart! < _selEnd! ? _selStart! : _selEnd!,
+                        _selStart! < _selEnd! ? _selEnd! : _selStart!,
+                      )
+                    : null,
+              ),
+            ),
+            if (settings.showStatusBar) _buildCornerOverlay(s, settings, spec),
+          ],
         );
+        return pageContent;
       },
       onNext: () => controller.nextPage(),
       onPrev: () => controller.prevPage(),
@@ -845,15 +854,11 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     Widget corner(int option, Alignment alignment) {
       final text = contentOf(option);
       if (option == 0 || text.isEmpty) return const SizedBox.shrink();
+      // 无底色方框：纯文本叠在页面上，观感与正文一致
       return Align(
         alignment: alignment,
         child: Container(
-          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-          decoration: BoxDecoration(
-            color: spec.background.withValues(alpha: 0.75),
-            borderRadius: BorderRadius.circular(4),
-          ),
+          margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
           constraints: const BoxConstraints(maxWidth: 280),
           child: Text(
             text,

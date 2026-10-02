@@ -189,17 +189,90 @@ class _BackupPageState extends ConsumerState<BackupPage> {
       _busyText = title;
       _resetProgress();
     });
+    final prog = _OpProgress();
+    String? resultMsg;
     try {
-      final r = await op(ref.read(backupServiceProvider), store, _onProgress);
-      _toast('${r.summary()}（$title完成）');
+      final shown = _showProgressDialog(title, prog);
+      try {
+        final r = await op(ref.read(backupServiceProvider), store, (
+          done,
+          total,
+          phase,
+        ) {
+          prog.update(done, total, phase);
+          if (mounted) {
+            setState(() {
+              _opDone = done;
+              _opTotal = total;
+              _opPhase = phase;
+            });
+          }
+        });
+        resultMsg = '${r.summary()}（$title完成）';
+      } finally {
+        await _closeProgressDialog(shown);
+      }
     } catch (e) {
-      _toast('$title失败：$e');
+      resultMsg = '$title失败：$e';
     } finally {
+      prog.dispose();
       await store.dispose();
       if (mounted) {
         setState(() => _busy = false);
       }
     }
+    _toast(resultMsg);
+  }
+
+  /// 操作进度弹窗（不可手动关闭，操作完成后自动关闭）。
+  /// 返回对话框 Future，供关闭时等待退场动画结束。
+  Future<void> _showProgressDialog(String title, _OpProgress prog) {
+    return showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          title: Text('$title中…'),
+          content: ListenableBuilder(
+            listenable: Listenable.merge([prog.done, prog.total, prog.phase]),
+            builder: (ctx, _) {
+              final total = prog.total.value;
+              final done = prog.done.value;
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    prog.phase.value.isEmpty ? '准备中…' : prog.phase.value,
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                  const SizedBox(height: 12),
+                  LinearProgressIndicator(
+                    value: total > 0 ? (done / total).clamp(0.0, 1.0) : null,
+                  ),
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: Text(
+                      total > 0 ? '$done / $total' : '',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 关闭进度弹窗并等待退场动画完成（保证 toast 在弹窗关闭后弹出）
+  Future<void> _closeProgressDialog(Future<void> shown) async {
+    final nav = Navigator.of(context, rootNavigator: true);
+    if (nav.canPop()) nav.pop();
+    await shown;
   }
 
   Future<void> _onRestore() async {
@@ -209,37 +282,75 @@ class _BackupPageState extends ConsumerState<BackupPage> {
       _busy = true;
       _busyText = '读取备份清单';
     });
+    List<(String, BackupManifest)> manifests;
     try {
-      final manifests = await ref
-          .read(backupServiceProvider)
-          .listManifests(store);
-      if (!mounted) return;
-      if (manifests.isEmpty) {
-        _toast('远端没有找到备份清单');
-        return;
-      }
-      final name = await _pickManifest(manifests);
-      if (name == null) return;
-      if (mounted) {
-        setState(() => _busyText = '正在恢复');
-      }
-      final r = await ref
-          .read(backupServiceProvider)
-          .restore(
-            store,
-            manifestName: name,
-            onProgress: _onProgress,
-            opts: _opts,
-          );
-      _toast('恢复完成：${r.summary()}');
+      manifests = await ref.read(backupServiceProvider).listManifests(store);
     } catch (e) {
-      _toast('恢复失败：$e');
+      await store.dispose();
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+      _toast('读取备份清单失败：$e');
+      return;
+    }
+    if (!mounted) {
+      await store.dispose();
+      return;
+    }
+    if (manifests.isEmpty) {
+      setState(() => _busy = false);
+      await store.dispose();
+      _toast('远端没有找到备份清单');
+      return;
+    }
+    final name = await _pickManifest(manifests);
+    if (name == null) {
+      await store.dispose();
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+      return;
+    }
+    if (mounted) {
+      setState(() => _busyText = '正在恢复');
+    }
+
+    final prog = _OpProgress();
+    String resultMsg;
+    try {
+      final shown = _showProgressDialog('恢复', prog);
+      try {
+        final r = await ref
+            .read(backupServiceProvider)
+            .restore(
+              store,
+              manifestName: name,
+              onProgress: (done, total, phase) {
+                prog.update(done, total, phase);
+                if (mounted) {
+                  setState(() {
+                    _opDone = done;
+                    _opTotal = total;
+                    _opPhase = phase;
+                  });
+                }
+              },
+              opts: _opts,
+            );
+        resultMsg = '恢复完成：${r.summary()}';
+      } finally {
+        await _closeProgressDialog(shown);
+      }
+    } catch (e) {
+      resultMsg = '恢复失败：$e';
     } finally {
+      prog.dispose();
       await store.dispose();
       if (mounted) {
         setState(() => _busy = false);
       }
     }
+    _toast(resultMsg);
   }
 
   Future<String?> _pickManifest(List<(String, BackupManifest)> manifests) {
@@ -262,8 +373,18 @@ class _BackupPageState extends ConsumerState<BackupPage> {
               ListTile(
                 leading: const Icon(Icons.history),
                 title: Text(m.deviceName),
-                subtitle: Text(
-                  '${_fmtTime(m.createdAt)} · ${m.books.length} 本书籍',
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('${_fmtTime(m.createdAt)} · ${m.books.length} 本书籍'),
+                    Text(
+                      name,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Theme.of(ctx).colorScheme.outline,
+                      ),
+                    ),
+                  ],
                 ),
                 onTap: () => Navigator.pop(ctx, name),
               ),
@@ -669,8 +790,15 @@ class _BackupPageState extends ConsumerState<BackupPage> {
                 },
               ),
             ..._buildTargetConfig(),
-            const _SectionHeader('忽略列表'),
-            ..._buildIgnoreList(),
+            // 忽略列表入口：点击弹窗查看/编辑（勾选的数据不参与备份与恢复）
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.filter_alt_outlined),
+              title: const Text('忽略列表'),
+              subtitle: const Text('选择不参与备份与恢复的数据'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: _showIgnoreList,
+            ),
             const _SectionHeader('操作'),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -715,42 +843,75 @@ class _BackupPageState extends ConsumerState<BackupPage> {
     );
   }
 
-  /// 忽略列表：勾选的数据不参与备份与恢复
-  List<Widget> _buildIgnoreList() {
-    return [
-      Padding(
-        padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
-        child: Text(
-          '勾选的数据不参与备份与恢复（例如换机时不覆盖本机设置）',
-          style: Theme.of(context).textTheme.bodySmall,
+  /// 忽略列表弹窗：勾选的数据不参与备份与恢复
+  Future<void> _showIgnoreList() {
+    return showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialog) => AlertDialog(
+          title: const Text('忽略列表'),
+          content: SizedBox(
+            width: 380,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: Text(
+                    '勾选的数据不参与备份与恢复（例如换机时不覆盖本机设置）',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
+                SwitchListTile(
+                  dense: true,
+                  title: const Text('主题设置'),
+                  value: _cfg.ignoreTheme,
+                  onChanged: (v) {
+                    _update((c) => c.copyWith(ignoreTheme: v));
+                    setDialog(() {});
+                  },
+                ),
+                SwitchListTile(
+                  dense: true,
+                  title: const Text('阅读界面设置'),
+                  value: _cfg.ignoreReader,
+                  onChanged: (v) {
+                    _update((c) => c.copyWith(ignoreReader: v));
+                    setDialog(() {});
+                  },
+                ),
+                SwitchListTile(
+                  dense: true,
+                  title: const Text('阅读统计'),
+                  value: _cfg.ignoreStats,
+                  onChanged: (v) {
+                    _update((c) => c.copyWith(ignoreStats: v));
+                    setDialog(() {});
+                  },
+                ),
+                SwitchListTile(
+                  dense: true,
+                  title: const Text('本机备份配置'),
+                  subtitle: const Text('包含备份目标地址、账号等，恢复时保留本机填写的内容'),
+                  value: _cfg.ignoreBackupCfg,
+                  isThreeLine: true,
+                  onChanged: (v) {
+                    _update((c) => c.copyWith(ignoreBackupCfg: v));
+                    setDialog(() {});
+                  },
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('完成'),
+            ),
+          ],
         ),
       ),
-      SwitchListTile(
-        dense: true,
-        title: const Text('主题设置'),
-        value: _cfg.ignoreTheme,
-        onChanged: (v) => _update((c) => c.copyWith(ignoreTheme: v)),
-      ),
-      SwitchListTile(
-        dense: true,
-        title: const Text('阅读界面设置'),
-        value: _cfg.ignoreReader,
-        onChanged: (v) => _update((c) => c.copyWith(ignoreReader: v)),
-      ),
-      SwitchListTile(
-        dense: true,
-        title: const Text('阅读统计'),
-        value: _cfg.ignoreStats,
-        onChanged: (v) => _update((c) => c.copyWith(ignoreStats: v)),
-      ),
-      SwitchListTile(
-        dense: true,
-        title: const Text('本机备份配置'),
-        subtitle: const Text('包含备份目标地址、账号等，恢复时保留本机填写的内容'),
-        value: _cfg.ignoreBackupCfg,
-        onChanged: (v) => _update((c) => c.copyWith(ignoreBackupCfg: v)),
-      ),
-    ];
+    );
   }
 
   List<Widget> _buildTargetConfig() {
@@ -943,4 +1104,23 @@ class _SyncPlan {
   bool push = false;
   final deleteLocalIds = <String>{};
   final deleteRemoteIds = <String>{};
+}
+
+/// 操作进度（备份/恢复弹窗用）：ValueNotifier 三件套驱动对话框刷新
+class _OpProgress {
+  final done = ValueNotifier<int>(0);
+  final total = ValueNotifier<int>(0);
+  final phase = ValueNotifier<String>('');
+
+  void update(int d, int t, String p) {
+    done.value = d;
+    total.value = t;
+    phase.value = p;
+  }
+
+  void dispose() {
+    done.dispose();
+    total.dispose();
+    phase.dispose();
+  }
 }

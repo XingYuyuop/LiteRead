@@ -700,14 +700,18 @@ class _PageFlowState extends State<PageFlow>
       if (ok && mounted) setState(() {});
       return;
     }
-    final old = widget.buildPage();
-    final ok = await turn();
-    if (!ok || !mounted) return;
+    // 先挂上旧页（outgoing）再执行翻页：状态更新发生在 await 间隙时，
+    // 页面仍显示旧页（新页在屏幕外/进度 0 处），不会闪现一帧新页内容
     setState(() {
-      _outgoing = old;
+      _outgoing = widget.buildPage();
       _direction = dir;
       _fromT = 0;
     });
+    final ok = await turn();
+    if (!ok || !mounted) {
+      if (mounted) setState(() => _outgoing = null);
+      return;
+    }
     await _ctrl.forward(from: 0);
     if (mounted) {
       setState(() => _outgoing = null);
@@ -799,19 +803,20 @@ class _PageFlowState extends State<PageFlow>
     }
 
     if (shouldTurn) {
-      // 从当前拖拽进度继续动画到 1（无缝：起始显示值恰为拖拽进度）
+      // 从当前拖拽进度继续动画到 1（无缝：起始显示值恰为拖拽进度）。
+      // 先挂 outgoing 再翻页：await 间隙保持拖拽末帧画面，避免闪现新页
       if (_outgoing == null) {
-        final old = widget.buildPage();
+        setState(() {
+          _outgoing = widget.buildPage();
+          _fromT = t;
+        });
         final ok = await (_direction == 1 ? widget.onNext() : widget.onPrev());
         if (ok && mounted) {
-          setState(() {
-            _outgoing = old;
-            _fromT = t;
-          });
           await _ctrl.forward(from: 0);
           if (mounted) setState(() => _outgoing = null);
           return;
         }
+        if (mounted) setState(() => _outgoing = null);
       }
       await _turn(_direction == 1 ? widget.onNext : widget.onPrev, _direction);
     } else if (t > 0.001) {

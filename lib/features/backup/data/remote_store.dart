@@ -174,14 +174,25 @@ class WebDavStore extends RemoteStore {
 
   @override
   Future<void> putFile(String path, List<int> bytes) async {
-    final req = await _open('PUT', _url(path));
-    req.headers.contentType = ContentType.binary;
-    req.add(bytes);
-    final res = await req.close();
+    var res = await _put(path, bytes);
+    // 部分服务在父目录缺失时返回 404/409：补建父目录后重试一次
+    if (res.statusCode == 404 || res.statusCode == 409) {
+      await res.drain<void>();
+      final segs = path.split('/')..removeLast();
+      await ensureDir(segs.isEmpty ? '' : segs.join('/'));
+      res = await _put(path, bytes);
+    }
     await res.drain<void>();
     if (res.statusCode >= 300) {
       throw BackupException('WebDAV 上传失败（HTTP ${res.statusCode}）');
     }
+  }
+
+  Future<HttpClientResponse> _put(String path, List<int> bytes) async {
+    final req = await _open('PUT', _url(path));
+    req.headers.contentType = ContentType.binary;
+    req.add(bytes);
+    return req.close();
   }
 
   @override

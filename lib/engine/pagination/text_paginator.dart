@@ -490,7 +490,9 @@ class TextPaginator {
     }
 
     // 段前间距：标题前更大；正文段落取 paragraphSpacing × 整行高
-    // （默认 0.85 行，配合 1.65 行距达到舒适的阅读密度）
+    // （默认 0.85 行，配合 1.65 行距达到舒适的阅读密度）。
+    // 行网格量化：段前距对齐到整数行——正文行高已由 strut 恒定，
+    // 量化后每页可容纳的行槽数固定，页首/页尾版面整齐（固定每页行数）
     double spaceAbove;
     final spacingUnit = cfg.fontSize * cfg.lineHeight;
     switch (block.type) {
@@ -506,6 +508,7 @@ class TextPaginator {
         spaceAbove = spacingUnit * cfg.paragraphSpacing;
         break;
     }
+    spaceAbove = _snapSlot(spaceAbove, cfg);
 
     return LaidOutBlock(
       blockIndex: blockIndex,
@@ -522,6 +525,15 @@ class TextPaginator {
       prefixChars: prefix.length,
       rubyRuns: rubyRuns,
     );
+  }
+
+  /// 行网格量化：[v] 对齐到标准行高（fontSize×lineHeight）的整数倍。
+  /// 正文行高已由 forceStrutHeight 恒定，段前距取整后整页高度
+  /// 均为行槽的整数倍，每页行数固定、断页位置规律。
+  static double _snapSlot(double v, LayoutConfig cfg) {
+    final slot = cfg.fontSize * cfg.lineHeight;
+    if (v <= 0 || slot <= 0) return 0;
+    return (v / slot).roundToDouble() * slot;
   }
 
   LaidOutBlock _measureImage(
@@ -547,7 +559,10 @@ class TextPaginator {
       lineTops: [0],
       lineHeights: [h],
       lineStartChars: [0],
-      spaceAbove: cfg.fontSize * cfg.lineHeight * cfg.paragraphSpacing * 0.6,
+      spaceAbove: _snapSlot(
+        cfg.fontSize * cfg.lineHeight * cfg.paragraphSpacing * 0.6,
+        cfg,
+      ),
       indentWidth: 0,
       quoteDepth: 0,
       isImage: true,
@@ -567,7 +582,7 @@ class TextPaginator {
       lineTops: [0],
       lineHeights: [h],
       lineStartChars: [0],
-      spaceAbove: cfg.fontSize * cfg.lineHeight * 0.5,
+      spaceAbove: _snapSlot(cfg.fontSize * cfg.lineHeight * 0.5, cfg),
       indentWidth: 0,
       quoteDepth: 0,
       isImage: false,

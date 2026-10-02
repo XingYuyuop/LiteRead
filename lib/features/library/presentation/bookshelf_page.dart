@@ -20,21 +20,37 @@ import '../../backup/logic/backup_config.dart';
 import '../../settings/logic/app_prefs.dart';
 import '../data/book_repository.dart';
 
-/// 书架视图偏好（排序 / 网格切换），持久化到 settings_kv
+/// 书架视图偏好（排序 / 网格切换 / 网格列数），持久化到 settings_kv
 class BookshelfPrefs {
-  const BookshelfPrefs({this.sort = BookSort.lastRead, this.grid = true});
+  const BookshelfPrefs({
+    this.sort = BookSort.lastRead,
+    this.grid = true,
+    this.columns = 0,
+  });
 
   final BookSort sort;
   final bool grid;
 
-  BookshelfPrefs copyWith({BookSort? sort, bool? grid}) =>
-      BookshelfPrefs(sort: sort ?? this.sort, grid: grid ?? this.grid);
+  /// 网格列数：0 = 自动（按卡片宽度自适应），2..6 = 固定列数
+  final int columns;
 
-  Map<String, dynamic> toJson() => {'sort': sort.index, 'grid': grid};
+  BookshelfPrefs copyWith({BookSort? sort, bool? grid, int? columns}) =>
+      BookshelfPrefs(
+        sort: sort ?? this.sort,
+        grid: grid ?? this.grid,
+        columns: columns ?? this.columns,
+      );
+
+  Map<String, dynamic> toJson() => {
+    'sort': sort.index,
+    'grid': grid,
+    'columns': columns,
+  };
 
   static BookshelfPrefs fromJson(Map<String, dynamic> j) => BookshelfPrefs(
     sort: BookSort.values[j['sort'] as int? ?? 0],
     grid: j['grid'] as bool? ?? true,
+    columns: j['columns'] as int? ?? 0,
   );
 }
 
@@ -217,12 +233,35 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
                 backgroundColor: Colors.transparent,
                 actions: [
                   _appBarBtn(Icons.search, '搜索', () => _showSearch(context)),
-                  _appBarBtn(
-                    prefs.grid ? Icons.view_list : Icons.grid_view,
-                    '视图',
-                    () => ref
+                  // 视图菜单：列表 / 网格自动 / 固定列数（自定义视图大小）
+                  PopupMenuButton<int>(
+                    tooltip: '视图',
+                    icon: Icon(prefs.grid ? Icons.grid_view : Icons.view_list),
+                    iconSize: 20,
+                    onSelected: (v) => ref
                         .read(bookshelfPrefsProvider.notifier)
-                        .update((p) => p.copyWith(grid: !p.grid)),
+                        .update(
+                          (p) => v == -1
+                              ? p.copyWith(grid: false)
+                              : p.copyWith(grid: true, columns: v),
+                        ),
+                    itemBuilder: (_) => [
+                      _viewItem(-1, '列表视图', Icons.view_list, !prefs.grid),
+                      _viewItem(
+                        0,
+                        '网格 · 自动',
+                        Icons.grid_view,
+                        prefs.grid && prefs.columns == 0,
+                      ),
+                      const PopupMenuDivider(),
+                      for (final c in [2, 3, 4, 5, 6])
+                        _viewItem(
+                          c,
+                          '网格 · $c 列',
+                          Icons.grid_view,
+                          prefs.grid && prefs.columns == c,
+                        ),
+                    ],
                   ),
                   _appBarBtn(
                     Icons.query_stats,
@@ -309,13 +348,19 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
                                     12,
                                     96,
                                   ),
-                                  gridDelegate:
-                                      const SliverGridDelegateWithMaxCrossAxisExtent(
-                                        maxCrossAxisExtent: 104,
-                                        mainAxisSpacing: 14,
-                                        crossAxisSpacing: 12,
-                                        childAspectRatio: 0.60,
-                                      ),
+                                  gridDelegate: prefs.columns >= 2
+                                      ? SliverGridDelegateWithFixedCrossAxisCount(
+                                          crossAxisCount: prefs.columns,
+                                          mainAxisSpacing: 14,
+                                          crossAxisSpacing: 12,
+                                          childAspectRatio: 0.60,
+                                        )
+                                      : const SliverGridDelegateWithMaxCrossAxisExtent(
+                                          maxCrossAxisExtent: 104,
+                                          mainAxisSpacing: 14,
+                                          crossAxisSpacing: 12,
+                                          childAspectRatio: 0.60,
+                                        ),
                                   itemCount: books.length,
                                   itemBuilder: (context, i) => _BookCard(
                                     book: books[i],
@@ -663,6 +708,28 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
         visualDensity: VisualDensity.compact,
         onPressed: onTap,
       );
+
+  /// 视图菜单项：图标 + 文案 + 当前选中勾标
+  PopupMenuItem<int> _viewItem(
+    int value,
+    String label,
+    IconData icon,
+    bool checked,
+  ) {
+    final accent = Theme.of(context).colorScheme.primary;
+    return PopupMenuItem<int>(
+      value: value,
+      height: 42,
+      child: Row(
+        children: [
+          Icon(icon, size: 17, color: checked ? accent : null),
+          const SizedBox(width: 10),
+          Expanded(child: Text(label, style: const TextStyle(fontSize: 14))),
+          if (checked) Icon(Icons.check, size: 16, color: accent),
+        ],
+      ),
+    );
+  }
 
   /// WiFi 传书：确保局域网服务已开启，弹出访问网址卡片（图 4 风格）。
   /// 长按/点击网址即复制；「取消」关闭服务并不再随启动自开。

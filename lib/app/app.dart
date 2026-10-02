@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/theme/reader_theme.dart';
@@ -8,11 +9,33 @@ import 'router.dart';
 import 'theme_controller.dart';
 
 /// 应用根：Material 3 + 主题联动阅读页
-class LiteReadApp extends ConsumerWidget {
+class LiteReadApp extends ConsumerStatefulWidget {
   const LiteReadApp({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<LiteReadApp> createState() => _LiteReadAppState();
+}
+
+class _LiteReadAppState extends ConsumerState<LiteReadApp> {
+  // 桌面端全局 ESC：焦点挂在路由容器上，未被子页面/输入框消费的 ESC
+  // 冒泡到这里触发 maybePop（返回上一页 / 关闭对话框）
+  final _escFocus = FocusNode();
+
+  @override
+  void dispose() {
+    _escFocus.dispose();
+    super.dispose();
+  }
+
+  void _onKey(KeyEvent event) {
+    if (event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.escape) {
+      rootNavigatorKey.currentState?.maybePop();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final themeState = ref.watch(themeControllerProvider);
     final router = ref.watch(routerProvider);
 
@@ -28,6 +51,12 @@ class LiteReadApp extends ConsumerWidget {
       title: 'LiteRead',
       debugShowCheckedModeBanner: false,
       routerConfig: router,
+      builder: (context, child) => KeyboardListener(
+        focusNode: _escFocus,
+        autofocus: true,
+        onKeyEvent: _onKey,
+        child: child!,
+      ),
       themeMode: themeState.mode == ThemeModeChoice.followSystem
           ? ThemeMode.system
           : (fixedSpec!.isDark ? ThemeMode.dark : ThemeMode.light),
