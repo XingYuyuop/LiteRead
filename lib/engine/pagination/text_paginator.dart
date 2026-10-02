@@ -106,11 +106,19 @@ class LaidOutBlock {
 
 /// 页内渲染单元：某块的第 [firstLine, firstLine+lineCount) 行
 class PageUnit {
-  const PageUnit(this.blockIndex, this.firstLine, this.lineCount);
+  const PageUnit(
+    this.blockIndex,
+    this.firstLine,
+    this.lineCount, {
+    this.spaceAbove = 0.0,
+  });
 
   final int blockIndex;
   final int firstLine;
   final int lineCount;
+
+  /// 本单元上方间距（分页时决定：页首为 0；页尾放不下段前距时压缩为 0）
+  final double spaceAbove;
 }
 
 /// 页盒：一章内的一页
@@ -243,75 +251,64 @@ class TextPaginator {
       used = 0;
     }
 
+    // 固定行数分页：正文行高恒为 fontSize × lineHeight（strut 强制等高），
+    // 段前距量化为整数行槽 → 每页可容纳的行槽数固定（N = 页高 / 行槽）。
+    // 逐行填页：放不下即切页（不做孤行回退），页首顶格省略段前距、
+    // 页尾放不下段前距时压缩段前距——保证除标题/图片等整块移动的页外，
+    // 每页文本行数恒定、页底对齐（先定每页 N 行，再按行均匀分页）。
     for (var bi = 0; bi < blocks.length; bi++) {
       final lb = blocks[bi];
-      final isFirstOnPage = units.isEmpty;
-      final spaceAbove = isFirstOnPage ? 0.0 : lb.spaceAbove;
 
-      // 整块可放入
-      if (used + spaceAbove + lb.totalHeight <= cfg.contentHeight ||
-          isFirstOnPage && lb.totalHeight <= cfg.contentHeight) {
-        if (isFirstOnPage) pageStartChar = firstVisibleChar(bi, 0);
-        units.add(PageUnit(bi, 0, lb.lineHeights.length));
-        used += spaceAbove + lb.totalHeight;
+      // 标题/图片/分隔线：跨页切开非常难看，整块处理
+      if (!_splittableAcrossPage(lb)) {
+        final sa = units.isEmpty ? 0.0 : lb.spaceAbove;
+        if (units.isNotEmpty &&
+            used + sa + lb.totalHeight > cfg.contentHeight) {
+          // 页尾放不下：整块移到下一页（页首顶格，不再计段前距）
+          flush();
+          pageStartChar = firstVisibleChar(bi, 0);
+          units.add(PageUnit(bi, 0, lb.lineHeights.length));
+          used = lb.totalHeight;
+          continue;
+        }
+        if (units.isEmpty) pageStartChar = firstVisibleChar(bi, 0);
+        units.add(PageUnit(bi, 0, lb.lineHeights.length, spaceAbove: sa));
+        used += sa + lb.totalHeight;
         continue;
       }
 
-      // 放不下：可切分块（正文段落等）先用前几行填满当前页剩余空间，
-      // 而不是整块下移——否则页尾留白忽多忽少，每页行数不一致。
-      // 孤行控制：切分点两侧各至少保留 2 行，避免页首/页尾出现单行段落。
-      var startLine = 0;
-      if (!isFirstOnPage && _splittableAcrossPage(lb)) {
-        final remaining = cfg.contentHeight - used - spaceAbove;
-        final totalLines = lb.lineHeights.length;
-        var fit = 0;
-        var acc = 0.0;
-        while (fit < totalLines && acc + lb.lineHeights[fit] <= remaining) {
-          acc += lb.lineHeights[fit];
-          fit++;
-        }
-        if (fit >= 2 && totalLines - fit < 2) {
-          // 下一页剩不到 2 行：回退切分点，给下一页留足孤行
-          fit = totalLines - 2;
-          acc = 0;
-          for (var i = 0; i < fit; i++) {
-            acc += lb.lineHeights[i];
-          }
-        }
-        if (fit >= 2 && totalLines - fit >= 2) {
-          units.add(PageUnit(bi, 0, fit));
-          used += spaceAbove + acc;
-          flush();
-          pageStartChar = firstVisibleChar(bi, fit);
-          startLine = fit;
-        }
-      }
-
-      if (startLine == 0) {
-        // 不可切分（标题/图片/分隔线）或剩余空间不足 2 行：整块移到下一页
-        flush();
-        pageStartChar = firstVisibleChar(bi, 0);
-      }
-
-      // 剩余行从新一页页首继续；整块超一页时按行跨多页切分
-      var lineIdx = startLine;
-      var lineUsed = 0.0;
-      var unitFirstLine = startLine;
+      // 正文/引用/列表/代码：逐行填页，页满即切
+      var lineIdx = 0;
       while (lineIdx < lb.lineHeights.length) {
         final h = lb.lineHeights[lineIdx];
-        if (lineUsed + h > cfg.contentHeight && lineIdx > unitFirstLine) {
-          units.add(PageUnit(bi, unitFirstLine, lineIdx - unitFirstLine));
-          flush();
-          pageStartChar = firstVisibleChar(bi, lineIdx);
-          unitFirstLine = lineIdx;
-          lineUsed = 0;
+        var sa = 0.0;
+        if (lineIdx == 0 && units.isNotEmpty) sa = lb.spaceAbove;
+        if (used + sa + h > cfg.contentHeight && used > 0) {
+          if (used + h <= cfg.contentHeight) {
+            // 页尾放不下段前距：压缩段前距，本行留在本页（固定行数优先）
+            sa = 0.0;
+          } else {
+            flush();
+            sa = 0.0;
+          }
         }
-        lineUsed += h;
+        if (units.isEmpty) pageStartChar = firstVisibleChar(bi, lineIdx);
+        final last = units.isEmpty ? null : units.last;
+        if (last != null &&
+            last.blockIndex == bi &&
+            last.firstLine + last.lineCount == lineIdx) {
+          // 同块连续行并入现有渲染单元
+          units[units.length - 1] = PageUnit(
+            bi,
+            last.firstLine,
+            last.lineCount + 1,
+            spaceAbove: last.spaceAbove,
+          );
+        } else {
+          units.add(PageUnit(bi, lineIdx, 1, spaceAbove: sa));
+        }
+        used += sa + h;
         lineIdx++;
-      }
-      if (lineIdx > unitFirstLine) {
-        units.add(PageUnit(bi, unitFirstLine, lineIdx - unitFirstLine));
-        used = lineUsed;
       }
     }
     flush();
@@ -576,12 +573,13 @@ class TextPaginator {
   }
 
   /// 行网格量化：[v] 对齐到标准行高（fontSize×lineHeight）的整数倍。
-  /// 正文行高已由 forceStrutHeight 恒定，段前距取整后整页高度
-  /// 均为行槽的整数倍，每页行数固定、断页位置规律。
+  /// 正文行高已由 forceStrutHeight 恒定，段前距向下取整到整数行槽：
+  /// 段前距不得挤占正文行位（保证每页文本行数恒定、页底对齐）；
+  /// 取整后为 0 时段落紧邻，以首行缩进区分段落（标准书版式）。
   static double _snapSlot(double v, LayoutConfig cfg) {
     final slot = cfg.fontSize * cfg.lineHeight;
     if (v <= 0 || slot <= 0) return 0;
-    return (v / slot).roundToDouble() * slot;
+    return (v / slot).floorToDouble() * slot;
   }
 
   LaidOutBlock _measureImage(

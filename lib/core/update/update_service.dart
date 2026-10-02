@@ -5,10 +5,18 @@ import 'dart:io';
 import '../storage/app_database.dart';
 
 /// 当前应用版本（X.Y.Z；与 pubspec.yaml 的 version 保持同步）
-const kAppVersion = '1.1.0';
+const kAppVersion = '1.1.1';
 
 /// GitHub 仓库（owner/name）
 const kGitHubRepo = 'XingYuyuop/LiteRead';
+
+/// GitHub 直连不可用（国内网络不稳定）时的镜像前缀：
+/// 路径拼接型代理，前缀 + 完整原始 URL；首项为空串 = 直连优先
+const kGitHubMirrorPrefixes = <String>[
+  '',
+  'https://gh-proxy.com/',
+  'https://ghfast.top/',
+];
 
 /// 检查更新结果
 class UpdateInfo {
@@ -117,25 +125,38 @@ class UpdateService {
     }
   }
 
-  /// 立即检查最新 Release
+  /// 立即检查最新 Release：直连失败自动切换镜像源
   Future<UpdateInfo> checkNow() async {
     await _db.setSetting(
       _keyLastCheck,
       DateTime.now().millisecondsSinceEpoch.toString(),
     );
-    final client = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 10);
+    const api = 'https://api.github.com/repos/$kGitHubRepo/releases/latest';
+    Object? lastErr;
+    for (final prefix in kGitHubMirrorPrefixes) {
+      try {
+        return await _fetchRelease('$prefix$api');
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    throw Exception('无法连接 GitHub（已尝试直连与镜像源）：$lastErr');
+  }
+
+  Future<UpdateInfo> _fetchRelease(String url) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 6);
     try {
-      final req = await client.getUrl(
-        Uri.parse('https://api.github.com/repos/$kGitHubRepo/releases/latest'),
-      );
+      final req = await client.getUrl(Uri.parse(url));
       req.headers.set(HttpHeaders.acceptHeader, 'application/vnd.github+json');
       req.headers.set('User-Agent', 'LiteRead-App');
-      final res = await req.close().timeout(const Duration(seconds: 15));
+      final res = await req.close().timeout(const Duration(seconds: 8));
       if (res.statusCode != 200) {
-        throw Exception('GitHub API 返回 ${res.statusCode}');
+        throw HttpException('HTTP ${res.statusCode}');
       }
-      final body = await res.transform(utf8.decoder).join();
+      final body = await res
+          .transform(utf8.decoder)
+          .join()
+          .timeout(const Duration(seconds: 10));
       final j = jsonDecode(body) as Map<String, dynamic>;
       // 附件下载地址（apk/zip），供应用内直接更新
       final assets = <String, String>{};

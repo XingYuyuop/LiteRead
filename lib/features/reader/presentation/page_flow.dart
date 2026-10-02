@@ -92,9 +92,7 @@ class PageCanvas extends StatelessWidget {
     var total = 0.0;
     for (final unit in page.units) {
       final lb = laid.blocks[unit.blockIndex];
-      final spaceAbove = identical(unit, page.units.first)
-          ? 0.0
-          : lb.spaceAbove;
+      final spaceAbove = unit.spaceAbove;
       total +=
           spaceAbove +
           lb.lineHeights
@@ -117,9 +115,7 @@ class PageCanvas extends StatelessWidget {
     var y = margins.top;
     for (final unit in page.units) {
       final lb = laid.blocks[unit.blockIndex];
-      final spaceAbove = identical(unit, page.units.first)
-          ? 0.0
-          : lb.spaceAbove;
+      final spaceAbove = unit.spaceAbove;
       final visibleH = lb.lineHeights
           .skip(unit.firstLine)
           .take(unit.lineCount)
@@ -161,9 +157,7 @@ class PageCanvas extends StatelessWidget {
     var y = margins.top + imagePageTopOffset(laid, page, margins);
     for (final unit in page.units) {
       final lb = laid.blocks[unit.blockIndex];
-      final spaceAbove = identical(unit, page.units.first)
-          ? 0.0
-          : lb.spaceAbove;
+      final spaceAbove = unit.spaceAbove;
       final visibleH = lb.lineHeights
           .skip(unit.firstLine)
           .take(unit.lineCount)
@@ -192,9 +186,7 @@ class PageCanvas extends StatelessWidget {
     var y = margins.top;
     for (final unit in page.units) {
       final lb = laid.blocks[unit.blockIndex];
-      final spaceAbove = identical(unit, page.units.first)
-          ? 0.0
-          : lb.spaceAbove;
+      final spaceAbove = unit.spaceAbove;
       final visibleH = lb.lineHeights
           .skip(unit.firstLine)
           .take(unit.lineCount)
@@ -277,9 +269,7 @@ class _PagePainter extends CustomPainter {
 
     for (final unit in page.units) {
       final lb = laid.blocks[unit.blockIndex];
-      final spaceAbove = identical(unit, page.units.first)
-          ? 0.0
-          : lb.spaceAbove;
+      final spaceAbove = unit.spaceAbove;
       final visibleH = lb.lineHeights
           .skip(unit.firstLine)
           .take(unit.lineCount)

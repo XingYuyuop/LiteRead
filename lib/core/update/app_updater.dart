@@ -190,8 +190,27 @@ Future<void> requestStoragePermission() async {
   }
 }
 
-/// 下载安装包到临时目录，通过 Notifier 上报进度
+/// 下载安装包到临时目录，通过 Notifier 上报进度；
+/// 直连失败自动切换镜像源重试
 Future<File> _downloadToTemp(
+  String url,
+  ValueNotifier<double> progress,
+  ValueNotifier<String> phase,
+) async {
+  Object? lastErr;
+  for (final prefix in kGitHubMirrorPrefixes) {
+    try {
+      return await _downloadOnce('$prefix$url', progress, phase);
+    } catch (e) {
+      lastErr = e;
+      progress.value = 0;
+      phase.value = '下载源连接失败，尝试其他源…';
+    }
+  }
+  throw Exception(lastErr);
+}
+
+Future<File> _downloadOnce(
   String url,
   ValueNotifier<double> progress,
   ValueNotifier<String> phase,
@@ -201,7 +220,7 @@ Future<File> _downloadToTemp(
   final target = File(p.join(dir.path, 'literead_update_$fileName'));
   if (await target.exists()) await target.delete();
 
-  final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
+  final client = HttpClient()..connectionTimeout = const Duration(seconds: 12);
   try {
     final req = await client.getUrl(Uri.parse(url));
     req.headers.set('User-Agent', 'LiteRead-App');
