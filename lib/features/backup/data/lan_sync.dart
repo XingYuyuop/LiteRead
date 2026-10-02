@@ -22,9 +22,12 @@ class LanTransferStats {
   final String? lastTitle;
 }
 
-/// 本机局域网 IPv4 地址（排除回环与虚拟网卡），用于展示传书网址
+/// 本机局域网 IPv4 地址（排除回环与虚拟网卡），用于展示传书网址。
+/// 存在 WiFi 接口（wlan*）时只展示 WiFi 网段，
+/// 隐藏蜂窝流量（rmnet*）等局域网内不可达的链接。
 Future<List<String>> localIPv4Addresses() async {
   final out = <String>[];
+  final wifi = <String>[];
   try {
     for (final ni in await NetworkInterface.list()) {
       final n = ni.name.toLowerCase();
@@ -39,14 +42,17 @@ Future<List<String>> localIPv4Addresses() async {
           n.contains('hamachi') ||
           n.contains('hyper-v');
       if (virtual) continue;
+      final isWifi = n.startsWith('wlan');
       for (final a in ni.addresses) {
         if (a.type == InternetAddressType.IPv4 && !a.isLoopback) {
           out.add(a.address);
+          if (isWifi) wifi.add(a.address);
         }
       }
     }
   } catch (_) {}
-  return out;
+  // 有 WiFi 连接时只展示 WiFi 网段地址
+  return wifi.isNotEmpty ? wifi : out;
 }
 
 /// 本机全部 IPv4 地址（含回环与虚拟网卡）：扫描结果据此过滤自身设备

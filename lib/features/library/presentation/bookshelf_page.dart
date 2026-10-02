@@ -216,32 +216,28 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
                 ),
                 backgroundColor: Colors.transparent,
                 actions: [
-                  IconButton(
-                    tooltip: '搜索',
-                    icon: const Icon(Icons.search),
-                    onPressed: () => _showSearch(context),
-                  ),
-                  IconButton(
-                    tooltip: '视图',
-                    icon: Icon(prefs.grid ? Icons.view_list : Icons.grid_view),
-                    onPressed: () => ref
+                  _appBarBtn(Icons.search, '搜索', () => _showSearch(context)),
+                  _appBarBtn(
+                    prefs.grid ? Icons.view_list : Icons.grid_view,
+                    '视图',
+                    () => ref
                         .read(bookshelfPrefsProvider.notifier)
                         .update((p) => p.copyWith(grid: !p.grid)),
                   ),
-                  IconButton(
-                    tooltip: '阅读统计',
-                    icon: const Icon(Icons.query_stats),
-                    onPressed: () => context.push('/stats'),
+                  _appBarBtn(
+                    Icons.query_stats,
+                    '阅读统计',
+                    () => context.push('/stats'),
                   ),
-                  IconButton(
-                    tooltip: 'WiFi 传书',
-                    icon: const Icon(Icons.wifi),
-                    onPressed: () => _showWifiTransfer(context),
+                  _appBarBtn(
+                    Icons.wifi,
+                    'WiFi 传书',
+                    () => _showWifiTransfer(context),
                   ),
-                  IconButton(
-                    tooltip: '设置',
-                    icon: const Icon(Icons.settings_outlined),
-                    onPressed: () => context.push('/settings'),
+                  _appBarBtn(
+                    Icons.settings_outlined,
+                    '设置',
+                    () => context.push('/settings'),
                   ),
                 ],
               ),
@@ -657,6 +653,16 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
     if (result == null || result.files.isEmpty) return;
     await _importPaths(result.files.map((f) => f.path!).toList());
   }
+
+  /// 顶栏紧凑按钮：缩小图标与点击区域，保证标题「LiteRead」在窄屏完整显示
+  Widget _appBarBtn(IconData icon, String tooltip, VoidCallback onTap) =>
+      IconButton(
+        tooltip: tooltip,
+        icon: Icon(icon),
+        iconSize: 20,
+        visualDensity: VisualDensity.compact,
+        onPressed: onTap,
+      );
 
   /// WiFi 传书：确保局域网服务已开启，弹出访问网址卡片（图 4 风格）。
   /// 长按/点击网址即复制；「取消」关闭服务并不再随启动自开。
