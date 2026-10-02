@@ -2,7 +2,7 @@ name: literead
 description: "轻阅 LiteRead — 轻量化多格式阅读器（本地优先 / EPUB·MOBI·AZW3·PDF·MD·TXT）"
 publish_to: 'none'
 
-version: 1.0.9+20
+version: 1.1.0+21
 
 environment:
   sdk: ^3.12.2
