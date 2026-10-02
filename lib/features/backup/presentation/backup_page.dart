@@ -177,7 +177,9 @@ class _BackupPageState extends ConsumerState<BackupPage> {
       _busyText = '读取备份清单';
     });
     try {
-      final manifests = await ref.read(backupServiceProvider).listManifests(store);
+      final manifests = await ref
+          .read(backupServiceProvider)
+          .listManifests(store);
       if (!mounted) return;
       if (manifests.isEmpty) {
         _toast('远端没有找到备份清单');
@@ -334,7 +336,9 @@ class _BackupPageState extends ConsumerState<BackupPage> {
                 _cfg.type == t
                     ? Icons.radio_button_checked
                     : Icons.radio_button_off,
-                color: _cfg.type == t ? Theme.of(context).colorScheme.primary : null,
+                color: _cfg.type == t
+                    ? Theme.of(context).colorScheme.primary
+                    : null,
               ),
               title: Text(t.label),
               onTap: () => _update((c) => c.copyWith(type: t)),
@@ -483,10 +487,9 @@ class _BackupPageState extends ConsumerState<BackupPage> {
             _cfg.lanAddress == d.address && _cfg.lanPort == d.port
                 ? Icons.radio_button_checked
                 : Icons.radio_button_off,
-            color:
-                _cfg.lanAddress == d.address && _cfg.lanPort == d.port
-                    ? Theme.of(context).colorScheme.primary
-                    : null,
+            color: _cfg.lanAddress == d.address && _cfg.lanPort == d.port
+                ? Theme.of(context).colorScheme.primary
+                : null,
           ),
           title: Text(d.name),
           subtitle: Text('${d.address}:${d.port}'),

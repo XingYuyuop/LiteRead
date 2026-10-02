@@ -13,7 +13,11 @@ const lanSyncPort = 47816;
 
 /// 局域网设备信息
 class LanDevice {
-  const LanDevice({required this.address, required this.port, required this.name});
+  const LanDevice({
+    required this.address,
+    required this.port,
+    required this.name,
+  });
 
   final String address;
   final int port;
@@ -79,11 +83,7 @@ class LanSyncServer {
         final msg = utf8.decode(dg.data, allowMalformed: true);
         if (msg != 'LITEREAD_DISCOVER') return;
         final reply = utf8.encode(
-          jsonEncode({
-            'app': 'literead',
-            'name': _deviceName(),
-            'port': port,
-          }),
+          jsonEncode({'app': 'literead', 'name': _deviceName(), 'port': port}),
         );
         _udp!.send(reply, dg.address, dg.port);
       });
@@ -328,12 +328,10 @@ class LanSyncServer {
         language: Value(entry['language'] as String?),
         fileSize: Value(entry['fileSize'] as int?),
         metaJson: Value(entry['metaJson'] as String?),
-        groupName: Value(
-          () {
-            final g = entry['groupName'] as String?;
-            return (g == null || g.isEmpty) ? null : g;
-          }(),
-        ),
+        groupName: Value(() {
+          final g = entry['groupName'] as String?;
+          return (g == null || g.isEmpty) ? null : g;
+        }()),
       ),
     );
   }
@@ -411,8 +409,10 @@ class LanScanner {
           }
         } catch (_) {}
       });
-      await completer.future.timeout(const Duration(milliseconds: 2500),
-          onTimeout: () {});
+      await completer.future.timeout(
+        const Duration(milliseconds: 2500),
+        onTimeout: () {},
+      );
       sub.cancel();
     } catch (_) {
       // UDP 广播被防火墙拦截时回退 TCP 扫描
@@ -453,16 +453,12 @@ class LanScanner {
         final ip = candidates[index++];
         final name = await _probe(ip);
         if (name != null) {
-          out.add(
-            LanDevice(address: ip, port: lanSyncPort, name: name),
-          );
+          out.add(LanDevice(address: ip, port: lanSyncPort, name: name));
         }
       }
     }
 
-    await Future.wait([
-      for (var i = 0; i < 32; i++) worker(),
-    ]);
+    await Future.wait([for (var i = 0; i < 32; i++) worker()]);
     return out;
   }
 

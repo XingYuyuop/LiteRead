@@ -423,9 +423,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     final data = await doc.resources.get(src);
     if (data == null || data.isEmpty) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('图片资源加载失败')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('图片资源加载失败')));
       }
       return;
     }
@@ -1159,10 +1159,26 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                _cornerDropdown('左上角', topLeft, (v) => setDialog(() => topLeft = v)),
-                _cornerDropdown('右上角', topRight, (v) => setDialog(() => topRight = v)),
-                _cornerDropdown('左下角', bottomLeft, (v) => setDialog(() => bottomLeft = v)),
-                _cornerDropdown('右下角', bottomRight, (v) => setDialog(() => bottomRight = v)),
+                _cornerDropdown(
+                  '左上角',
+                  topLeft,
+                  (v) => setDialog(() => topLeft = v),
+                ),
+                _cornerDropdown(
+                  '右上角',
+                  topRight,
+                  (v) => setDialog(() => topRight = v),
+                ),
+                _cornerDropdown(
+                  '左下角',
+                  bottomLeft,
+                  (v) => setDialog(() => bottomLeft = v),
+                ),
+                _cornerDropdown(
+                  '右下角',
+                  bottomRight,
+                  (v) => setDialog(() => bottomRight = v),
+                ),
               ],
             ),
           ),
@@ -1192,16 +1208,15 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     if (mounted) _keyboardFocus.requestFocus();
   }
 
-  Widget _cornerDropdown(
-    String label,
-    int value,
-    ValueChanged<int> onChanged,
-  ) {
+  Widget _cornerDropdown(String label, int value, ValueChanged<int> onChanged) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
         children: [
-          SizedBox(width: 60, child: Text(label, style: const TextStyle(fontSize: 13))),
+          SizedBox(
+            width: 60,
+            child: Text(label, style: const TextStyle(fontSize: 13)),
+          ),
           Expanded(
             child: DropdownButton<int>(
               value: value,
@@ -1209,7 +1224,10 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
               underline: const SizedBox.shrink(),
               items: [
                 for (var i = 0; i < cornerOptionLabels.length; i++)
-                  DropdownMenuItem(value: i, child: Text(cornerOptionLabels[i])),
+                  DropdownMenuItem(
+                    value: i,
+                    child: Text(cornerOptionLabels[i]),
+                  ),
               ],
               onChanged: (v) {
                 if (v != null) onChanged(v);
@@ -1660,9 +1678,7 @@ class _ImageViewerDialog extends StatelessWidget {
           Positioned.fill(
             child: InteractiveViewer(
               maxScale: 8,
-              child: Center(
-                child: Image.memory(data, fit: BoxFit.contain),
-              ),
+              child: Center(child: Image.memory(data, fit: BoxFit.contain)),
             ),
           ),
           // 顶部操作条
@@ -1706,15 +1722,15 @@ class _ImageViewerDialog extends StatelessWidget {
     try {
       await File(path).writeAsBytes(bytes, flush: true);
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('已保存到 $path')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('已保存到 $path')));
       }
     } catch (e) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('保存失败：$e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('保存失败：$e')));
       }
     }
   }

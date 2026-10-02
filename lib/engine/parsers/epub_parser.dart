@@ -252,9 +252,7 @@ class EpubParser {
       for (final li in ol.children.where((e) => e.localName == 'li')) {
         // html 包选择器引擎不支持 :scope 伪类（会抛 UnimplementedError），
         // 改用直接子元素过滤。
-        final a = li.children
-            .where((e) => e.localName == 'a')
-            .firstOrNull;
+        final a = li.children.where((e) => e.localName == 'a').firstOrNull;
         if (a != null) {
           final href = a.attributes['href'];
           final idx = _spineIndexOf(href, spineHrefs);

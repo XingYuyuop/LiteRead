@@ -58,8 +58,7 @@ class BackupManifest {
 
   /// 清单文件名：`backup_<设备名>_<yyyyMMdd_HHmmss>.json`
   static String fileNameFor(String deviceName, DateTime time) {
-    final safe =
-        deviceName.replaceAll(RegExp(r'[\\/:*?"<>|\s]'), '_');
+    final safe = deviceName.replaceAll(RegExp(r'[\\/:*?"<>|\s]'), '_');
     final ts =
         '${time.year}${_p2(time.month)}${_p2(time.day)}_'
         '${_p2(time.hour)}${_p2(time.minute)}${_p2(time.second)}';
@@ -277,7 +276,10 @@ class BackupService {
       _fetchAllManifests(store);
 
   /// 从指定清单恢复（默认最新）：应用设置 + 补齐书籍 + 进度合并
-  Future<BackupResult> restore(RemoteStore store, {String? manifestName}) async {
+  Future<BackupResult> restore(
+    RemoteStore store, {
+    String? manifestName,
+  }) async {
     final r = BackupResult();
     await _ensureDirs(store);
 
@@ -391,7 +393,8 @@ class BackupService {
         title: entry['title'] as String? ?? '未命名',
         format: entry['format'] as String? ?? 'TXT',
         filePath: managedPath,
-        addedAt: entry['addedAt'] as int? ?? DateTime.now().millisecondsSinceEpoch,
+        addedAt:
+            entry['addedAt'] as int? ?? DateTime.now().millisecondsSinceEpoch,
       ).copyWith(
         author: Value(entry['author'] as String?),
         language: Value(entry['language'] as String?),
@@ -456,9 +459,7 @@ class BackupService {
     }
 
     // 本机较新的进度 → 推送到远端
-    final remoteNames = remoteFiles
-        .map((p) => p.split('/').last)
-        .toSet();
+    final remoteNames = remoteFiles.map((p) => p.split('/').last).toSet();
     for (final p in localRows) {
       final name = '${p.bookId}.json';
       final remotePath = 'progress/$name';
@@ -508,7 +509,10 @@ class BackupService {
   }
 
   /// 清理旧清单：每设备保留最新 [keepPerDevice] 份
-  Future<void> _pruneManifests(RemoteStore store, {int keepPerDevice = 3}) async {
+  Future<void> _pruneManifests(
+    RemoteStore store, {
+    int keepPerDevice = 3,
+  }) async {
     try {
       final files = await store.listFiles('');
       final manifestFiles = files.where((f) => f.endsWith('.json')).toList()

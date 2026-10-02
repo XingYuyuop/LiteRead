@@ -121,7 +121,10 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
             : AppBar(
                 title: const Text(
                   'LiteRead',
-                  style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: 2),
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 2,
+                  ),
                 ),
                 backgroundColor: Colors.transparent,
                 actions: [
@@ -145,7 +148,10 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
                         value: BookSort.addedAt,
                         child: Text('添加时间'),
                       ),
-                      const PopupMenuItem(value: BookSort.title, child: Text('书名')),
+                      const PopupMenuItem(
+                        value: BookSort.title,
+                        child: Text('书名'),
+                      ),
                     ],
                   ),
                   IconButton(
@@ -191,13 +197,14 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
                 builder: (context, snap) {
                   final all = snap.data ?? const <Book>[];
                   // 分组列表实时从书籍数据推导
-                  final groups = all
-                      .map((b) => b.groupName)
-                      .whereType<String>()
-                      .where((g) => g.isNotEmpty)
-                      .toSet()
-                      .toList()
-                    ..sort();
+                  final groups =
+                      all
+                          .map((b) => b.groupName)
+                          .whereType<String>()
+                          .where((g) => g.isNotEmpty)
+                          .toSet()
+                          .toList()
+                        ..sort();
                   var books = all;
                   if (_filterGroup != null) {
                     books = books
@@ -245,21 +252,32 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
                                     book: books[i],
                                     spec: spec,
                                     selectionMode: _selectionMode,
-                                    selected: _selectedIds.contains(books[i].id),
-                                    onTap: () =>
-                                        _onBookTap(books[i], selectionMode: _selectionMode),
+                                    selected: _selectedIds.contains(
+                                      books[i].id,
+                                    ),
+                                    onTap: () => _onBookTap(
+                                      books[i],
+                                      selectionMode: _selectionMode,
+                                    ),
                                     onLongPress: () =>
                                         _onBookLongPress(books[i]),
                                   ),
                                 )
                               : ListView.builder(
-                                  padding: const EdgeInsets.fromLTRB(8, 4, 8, 96),
+                                  padding: const EdgeInsets.fromLTRB(
+                                    8,
+                                    4,
+                                    8,
+                                    96,
+                                  ),
                                   itemCount: books.length,
                                   itemBuilder: (context, i) => _BookTile(
                                     book: books[i],
                                     spec: spec,
                                     selectionMode: _selectionMode,
-                                    selected: _selectedIds.contains(books[i].id),
+                                    selected: _selectedIds.contains(
+                                      books[i].id,
+                                    ),
                                     onTap: () => _onBookTap(
                                       books[i],
                                       selectionMode: _selectionMode,
@@ -353,9 +371,9 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
       );
     }
 
-    final ungrouped = all.where(
-      (b) => b.groupName == null || b.groupName!.isEmpty,
-    ).length;
+    final ungrouped = all
+        .where((b) => b.groupName == null || b.groupName!.isEmpty)
+        .length;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
@@ -391,12 +409,17 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
       _onBookTap(book, selectionMode: true);
       return;
     }
-    showBookActions(context, ref, book, onMultiSelect: () {
-      setState(() {
-        _selectionMode = true;
-        _selectedIds.add(book.id);
-      });
-    });
+    showBookActions(
+      context,
+      ref,
+      book,
+      onMultiSelect: () {
+        setState(() {
+          _selectionMode = true;
+          _selectedIds.add(book.id);
+        });
+      },
+    );
   }
 
   void _toggleSelectAll() {
@@ -418,7 +441,8 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
             .toList();
       }
       final allSelected =
-          filtered.isNotEmpty && filtered.every((b) => _selectedIds.contains(b.id));
+          filtered.isNotEmpty &&
+          filtered.every((b) => _selectedIds.contains(b.id));
       if (!mounted) return;
       setState(() {
         if (allSelected) {
@@ -437,9 +461,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('批量删除'),
-        content: Text(
-          '确定删除选中的 ${ids.length} 本书籍？\n书籍文件、阅读进度与批注将一并删除。',
-        ),
+        content: Text('确定删除选中的 ${ids.length} 本书籍？\n书籍文件、阅读进度与批注将一并删除。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -477,7 +499,9 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          group.isEmpty ? '已移出分组（${ids.length} 本）' : '已移入「$group」（${ids.length} 本）',
+          group.isEmpty
+              ? '已移出分组（${ids.length} 本）'
+              : '已移入「$group」（${ids.length} 本）',
         ),
       ),
     );
@@ -490,10 +514,8 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> {
     if (!mounted) return null;
     return showDialog<String>(
       context: context,
-      builder: (context) => GroupPickerDialog(
-        groups: groups,
-        initialGroup: initialGroup ?? '',
-      ),
+      builder: (context) =>
+          GroupPickerDialog(groups: groups, initialGroup: initialGroup ?? ''),
     );
   }
 
@@ -1011,9 +1033,9 @@ Future<void> showBookDetails(
 
   final cs = Theme.of(context).colorScheme;
   // 封面用当前明暗状态对应的阅读主题（书架卡片同源）
-  final spec = ref.read(themeControllerProvider).resolve(
-    MediaQuery.platformBrightnessOf(context) == Brightness.dark,
-  );
+  final spec = ref
+      .read(themeControllerProvider)
+      .resolve(MediaQuery.platformBrightnessOf(context) == Brightness.dark);
   final chapters = meta['chapterCount'];
   final chars = meta['charCount'];
   final pages = meta['pageCount'];
@@ -1031,10 +1053,7 @@ Future<void> showBookDetails(
         style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
       ),
       const SizedBox(height: 2),
-      Text(
-        label,
-        style: TextStyle(fontSize: 11, color: cs.outline),
-      ),
+      Text(label, style: TextStyle(fontSize: 11, color: cs.outline)),
     ],
   );
 
@@ -1080,10 +1099,7 @@ Future<void> showBookDetails(
                             const SizedBox(height: 6),
                             Text(
                               book.author ?? '佚名',
-                              style: TextStyle(
-                                fontSize: 13,
-                                color: cs.outline,
-                              ),
+                              style: TextStyle(fontSize: 13, color: cs.outline),
                             ),
                             const SizedBox(height: 10),
                             Wrap(
@@ -1132,9 +1148,12 @@ Future<void> showBookDetails(
                         else if (chapters != null)
                           stat('章节', '$chapters'),
                         if (chars != null && (chars as int) > 0)
-                          stat('字数', chars >= 10000
-                              ? '${(chars / 10000).toStringAsFixed(1)}万'
-                              : '$chars'),
+                          stat(
+                            '字数',
+                            chars >= 10000
+                                ? '${(chars / 10000).toStringAsFixed(1)}万'
+                                : '$chars',
+                          ),
                         stat('导入', dateStr),
                       ],
                     ),
@@ -1239,7 +1258,11 @@ class _MetaChip extends StatelessWidget {
 
 /// 分组选择对话框：返回 null = 取消；'' = 未分组；其他 = 分组名（可新建）
 class GroupPickerDialog extends StatefulWidget {
-  const GroupPickerDialog({super.key, required this.groups, this.initialGroup = ''});
+  const GroupPickerDialog({
+    super.key,
+    required this.groups,
+    this.initialGroup = '',
+  });
 
   final List<String> groups;
   final String initialGroup;
@@ -1283,7 +1306,10 @@ class _GroupPickerDialogState extends State<GroupPickerDialog> {
                               ? Theme.of(context).colorScheme.primary
                               : Theme.of(context).colorScheme.outline,
                         ),
-                        title: Text(g.isEmpty ? '（未分组）' : g, style: const TextStyle(fontSize: 14)),
+                        title: Text(
+                          g.isEmpty ? '（未分组）' : g,
+                          style: const TextStyle(fontSize: 14),
+                        ),
                         trailing: _selected == g
                             ? Icon(
                                 Icons.check,

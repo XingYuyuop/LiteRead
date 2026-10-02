@@ -160,19 +160,13 @@ class BookRepository {
       }
       // 清理关联数据（进度/标注/书签/标签），避免孤儿记录
       await (_db.delete(_db.progress)..where((t) => t.bookId.equals(id))).go();
-      await (
-        _db.delete(_db.highlights)..where((t) => t.bookId.equals(id))
-      ).go();
-      await (
-        _db.delete(_db.bookmarks)..where((t) => t.bookId.equals(id))
-      ).go();
-      await (
-        _db.delete(_db.bookTags)..where((t) => t.bookId.equals(id))
-      ).go();
+      await (_db.delete(
+        _db.highlights,
+      )..where((t) => t.bookId.equals(id))).go();
+      await (_db.delete(_db.bookmarks)..where((t) => t.bookId.equals(id))).go();
+      await (_db.delete(_db.bookTags)..where((t) => t.bookId.equals(id))).go();
     }
-    await (_db.delete(
-      _db.books,
-    )..where((t) => t.id.isIn(ids))).go();
+    await (_db.delete(_db.books)..where((t) => t.id.isIn(ids))).go();
   }
 
   // ---- 分组 ----
@@ -186,8 +180,8 @@ class BookRepository {
       )
       ..groupBy([_db.books.groupName]);
     final rows = await query.get();
-    final groups =
-        rows.map((r) => r.read(_db.books.groupName)!).toList()..sort();
+    final groups = rows.map((r) => r.read(_db.books.groupName)!).toList()
+      ..sort();
     return groups;
   }
 

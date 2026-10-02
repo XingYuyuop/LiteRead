@@ -115,7 +115,8 @@ class BackupConfig {
 
   static BackupConfig fromJson(Map<String, dynamic> j) => BackupConfig(
     folderName: j['folderName'] as String? ?? 'literead',
-    type: BackupTargetType.values.asNameMap()[j['type']] ??
+    type:
+        BackupTargetType.values.asNameMap()[j['type']] ??
         BackupTargetType.local,
     localPath: j['localPath'] as String? ?? '',
     webdavUrl: j['webdavUrl'] as String? ?? '',

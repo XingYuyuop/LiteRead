@@ -41,7 +41,7 @@ jobs:
           # 远端 tag 中最大的 vX.Y.Z.W（不足 4 段补 .0，忽略 beta 等非法版本）
           MAX=$(git ls-remote --tags origin 'v*' \
             | awk '{print $2}' \
-            | sed 's|refs/tags/||; s|\^\{\}$||' \
+            | sed -E 's|refs/tags/||; s|\^\{\}$||' \
             | while read -r t; do
                 v="${t#v}"
                 while [ "$(echo "$v" | awk -F. '{print NF}')" -lt 4 ]; do v="$v.0"; done

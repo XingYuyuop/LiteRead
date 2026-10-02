@@ -37,9 +37,7 @@ abstract class RemoteStore {
 /// 本地文件夹存储：备份目录为用户选择目录下的自定义文件夹名
 class LocalFolderStore extends RemoteStore {
   LocalFolderStore(this.parentDir, this.folderName) {
-    root = Directory(
-      '${parentDir.path}${Platform.pathSeparator}$folderName',
-    );
+    root = Directory('${parentDir.path}${Platform.pathSeparator}$folderName');
   }
 
   final Directory parentDir;
@@ -116,9 +114,8 @@ class WebDavStore extends RemoteStore {
   final String? username;
   final String? password;
 
-  final HttpClient _client = HttpClient()..connectionTimeout = const Duration(
-    seconds: 20,
-  );
+  final HttpClient _client = HttpClient()
+    ..connectionTimeout = const Duration(seconds: 20);
 
   String get _base {
     var b = baseUrl.trim();
@@ -131,10 +128,7 @@ class WebDavStore extends RemoteStore {
 
   /// 根目录绝对 URL（路径段逐段编码）
   String _url(String path) {
-    final segs = [
-      rootFolder,
-      ...path.split('/').where((s) => s.isNotEmpty),
-    ];
+    final segs = [rootFolder, ...path.split('/').where((s) => s.isNotEmpty)];
     final encoded = segs
         .map((s) => Uri.encodeComponent(s).replaceAll('+', '%20'))
         .join('/');
@@ -144,9 +138,7 @@ class WebDavStore extends RemoteStore {
   Future<HttpClientRequest> _open(String method, String url) async {
     final req = await _client.openUrl(method, Uri.parse(url));
     if (username != null && username!.isNotEmpty) {
-      final token = base64Encode(
-        utf8.encode('$username:${password ?? ''}'),
-      );
+      final token = base64Encode(utf8.encode('$username:${password ?? ''}'));
       req.headers.set(HttpHeaders.authorizationHeader, 'Basic $token');
     }
     return req;
@@ -199,7 +191,8 @@ class WebDavStore extends RemoteStore {
 
   @override
   Future<List<String>> listFiles(String path) async {
-    final body = '<?xml version="1.0"?><d:propfind xmlns:d="DAV:">'
+    final body =
+        '<?xml version="1.0"?><d:propfind xmlns:d="DAV:">'
         '<d:prop><d:resourcetype/></d:prop></d:propfind>';
     final req = await _open('PROPFIND', _url(path));
     req.headers.set('Depth', '1');
@@ -293,9 +286,8 @@ class S3Store extends RemoteStore {
   final String rootFolder;
   final bool pathStyle; // true: endpoint/bucket/key（自建 MinIO/R2 常用）
 
-  final HttpClient _client = HttpClient()..connectionTimeout = const Duration(
-    seconds: 20,
-  );
+  final HttpClient _client = HttpClient()
+    ..connectionTimeout = const Duration(seconds: 20);
 
   String get _host {
     var e = endpoint.trim();
@@ -330,7 +322,8 @@ class S3Store extends RemoteStore {
 
   String _url(String objectKey) {
     final host = pathStyle ? _host : '$bucket.$_host';
-    final portPart = (_port == 80 && _scheme == 'http') ||
+    final portPart =
+        (_port == 80 && _scheme == 'http') ||
             (_port == 443 && _scheme == 'https')
         ? ''
         : ':$_port';
@@ -349,8 +342,7 @@ class S3Store extends RemoteStore {
     final now = DateTime.now().toUtc();
     final amzDate =
         '${now.year}${_p2(now.month)}${_p2(now.day)}T${_p2(now.hour)}${_p2(now.minute)}${_p2(now.second)}Z';
-    final dateStamp =
-        '${now.year}${_p2(now.month)}${_p2(now.day)}';
+    final dateStamp = '${now.year}${_p2(now.month)}${_p2(now.day)}';
     final payloadHash = sha256.convert(body ?? const <int>[]).toString();
     final host = pathStyle ? _host : '$bucket.$_host';
 
@@ -398,9 +390,10 @@ class S3Store extends RemoteStore {
     final kRegion = _hmac(kDate, utf8.encode(region));
     final kService = _hmac(kRegion, utf8.encode('s3'));
     final kSigning = _hmac(kService, utf8.encode('aws4_request'));
-    final signature = _hmac(kSigning, utf8.encode(stringToSign))
-        .map((b) => b.toRadixString(16).padLeft(2, '0'))
-        .join();
+    final signature = _hmac(
+      kSigning,
+      utf8.encode(stringToSign),
+    ).map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
     final authorization =
         'AWS4-HMAC-SHA256 Credential=$accessKey/$scope, '
@@ -469,11 +462,11 @@ class S3Store extends RemoteStore {
   Future<List<String>> listFiles(String path) async {
     final prefix = _objectKey(path.isEmpty ? '' : path);
     // 列举桶级请求：canonicalUri 为根路径
-    final res = await _signed('GET', '', query: {
-      'list-type': '2',
-      'prefix': prefix,
-      'delimiter': '/',
-    });
+    final res = await _signed(
+      'GET',
+      '',
+      query: {'list-type': '2', 'prefix': prefix, 'delimiter': '/'},
+    );
     final data = await res.fold<List<int>>(<int>[], (a, b) => a..addAll(b));
     if (res.statusCode >= 300) {
       throw BackupException('S3 列表失败（HTTP ${res.statusCode}）');
@@ -517,9 +510,8 @@ class LanStore extends RemoteStore {
   final String host;
   final int port;
 
-  final HttpClient _client = HttpClient()..connectionTimeout = const Duration(
-    seconds: 10,
-  );
+  final HttpClient _client = HttpClient()
+    ..connectionTimeout = const Duration(seconds: 10);
 
   Uri _uri(String path, [Map<String, String>? q]) => Uri.parse(
     'http://$host:$port/api/$path${q == null ? '' : '?${Uri(queryParameters: q).query}'}',
@@ -579,9 +571,8 @@ class LanStore extends RemoteStore {
   /// 探测设备信息（name）
   static Future<String?> ping(String host, int port) async {
     try {
-      final client = HttpClient()..connectionTimeout = const Duration(
-        seconds: 3,
-      );
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 3);
       final req = await client.getUrl(Uri.parse('http://$host:$port/api/ping'));
       final res = await req.close();
       if (res.statusCode != 200) {

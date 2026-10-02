@@ -138,12 +138,7 @@ class PageCanvas extends StatelessWidget {
           .fold(0.0, (a, b) => a + b);
       y += spaceAbove;
       if (lb.isImage) {
-        final rect = Rect.fromLTWH(
-          margins.left,
-          y,
-          cfg.contentWidth,
-          visibleH,
-        );
+        final rect = Rect.fromLTWH(margins.left, y, cfg.contentWidth, visibleH);
         if (rect.contains(local)) {
           return lb.block.imageSrc;
         }
