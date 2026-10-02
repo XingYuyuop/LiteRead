@@ -85,6 +85,23 @@ class LanDevice {
   final List<String> addrs;
 }
 
+/// 对端推送来的同步进度（本机作为接收方展示，双方进度可见）
+class LanSyncProgress {
+  const LanSyncProgress({
+    required this.phase,
+    required this.done,
+    required this.total,
+    this.finished = false,
+  });
+
+  final String phase;
+  final int done;
+  final int total;
+  final bool finished;
+
+  double get value => total > 0 ? (done / total).clamp(0.0, 1.0) : 0;
+}
+
 /// 局域网同步服务端：开放 HTTP 端口，供其他 LiteRead 设备扫描/拉取/推送。
 ///
 /// 端点（均限定本应用）：
@@ -109,6 +126,25 @@ class LanSyncServer {
   final transferStats = ValueNotifier<LanTransferStats>(
     const LanTransferStats(),
   );
+
+  /// 对端同步进度（对端推送 /api/sync-progress 更新；超时自动清除）
+  final syncProgress = ValueNotifier<LanSyncProgress?>(null);
+  Timer? _progressExpire;
+
+  /// 收到对端进度：finished 时 3 秒后清除，否则 15 秒无更新自动清除
+  void _updateSyncProgress(LanSyncProgress p) {
+    _progressExpire?.cancel();
+    syncProgress.value = p;
+    if (p.finished) {
+      _progressExpire = Timer(const Duration(seconds: 3), () {
+        syncProgress.value = null;
+      });
+    } else {
+      _progressExpire = Timer(const Duration(seconds: 15), () {
+        syncProgress.value = null;
+      });
+    }
+  }
 
   bool get running => _server != null;
 
@@ -172,6 +208,9 @@ class LanSyncServer {
     _server = null;
     _udp?.close();
     _udp = null;
+    _progressExpire?.cancel();
+    _progressExpire = null;
+    syncProgress.value = null;
   }
 
   String _deviceName() {
@@ -239,6 +278,23 @@ class LanSyncServer {
         final bytes = await _readBody(req);
         final entry = jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
         await _registerBook(entry);
+        await _json(req, {'ok': true});
+        return;
+      }
+      if (path == '/api/sync-progress' && req.method == 'POST') {
+        // 对端推送的同步进度（双方进度可见）
+        final bytes = await _readBody(req);
+        try {
+          final j = jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
+          _updateSyncProgress(
+            LanSyncProgress(
+              phase: j['phase'] as String? ?? '',
+              done: (j['done'] as num?)?.toInt() ?? 0,
+              total: (j['total'] as num?)?.toInt() ?? 0,
+              finished: j['finished'] == true,
+            ),
+          );
+        } catch (_) {}
         await _json(req, {'ok': true});
         return;
       }
@@ -605,18 +661,17 @@ function send(f){
 </script>
 </body></html>''';
 
-/// 局域网设备扫描：优先 UDP 广播发现，失败时回退 TCP 端口扫描本网段
+/// 局域网设备扫描：UDP 广播 + UDP 单播扫射 + TCP 端口探测三法并发、结果合并。
+/// 手动输入 IP 可达而扫描不到的常见原因：
+/// - 广播被路由器/AP 隔离丢弃 → 单播 UDP 与 TCP 探测仍可达；
+/// - 入站 UDP 被防火墙拦截 → TCP 探测仍可达（与手动连接同一通道）。
 class LanScanner {
-  /// 扫描局域网设备（约 3 秒超时）
+  /// 扫描局域网设备（约 3 秒）
   static Future<List<LanDevice>> scan() async {
     final devices = <String, LanDevice>{};
-    final udp = await _udpScan();
-    for (final d in udp) {
-      devices['${d.address}:${d.port}'] = d;
-    }
-    if (devices.isEmpty) {
-      final tcp = await _tcpScan();
-      for (final d in tcp) {
+    final results = await Future.wait([_udpSweep(), _tcpScan()]);
+    for (final list in results) {
+      for (final d in list) {
         devices['${d.address}:${d.port}'] = d;
       }
     }
@@ -637,8 +692,30 @@ class LanScanner {
         n.contains('hyper-v');
   }
 
-  /// UDP 广播发现
-  static Future<List<LanDevice>> _udpScan() async {
+  /// 本机物理网卡的 /24 网段候选 IP（排除自身与虚拟网卡）
+  static Future<List<String>> _candidateIPs() async {
+    final localIps = await allLocalIPv4s();
+    final prefixes = <String>{};
+    try {
+      for (final ni in await NetworkInterface.list()) {
+        if (_isVirtualInterface(ni.name)) continue;
+        for (final a in ni.addresses) {
+          if (a.type != InternetAddressType.IPv4 || a.isLoopback) continue;
+          final parts = a.address.split('.');
+          if (parts.length != 4) continue;
+          prefixes.add('${parts[0]}.${parts[1]}.${parts[2]}');
+        }
+      }
+    } catch (_) {}
+    return [
+      for (final prefix in prefixes)
+        for (var i = 1; i <= 254; i++)
+          if (!localIps.contains('$prefix.$i')) '$prefix.$i',
+    ];
+  }
+
+  /// UDP 发现：广播 + 对全网段候选 IP 单播扫射（两路并发收应答）
+  static Future<List<LanDevice>> _udpSweep() async {
     final out = <LanDevice>[];
     final localIps = await allLocalIPv4s();
     RawDatagramSocket? socket;
@@ -650,17 +727,18 @@ class LanScanner {
         reuseAddress: true,
       );
       socket.broadcastEnabled = true;
-      // 本机所有网段的广播地址
-      final addrs = <String>{'255.255.255.255'};
+      // 广播地址（各网段定向广播 + 受限广播）
+      final broadcastAddrs = <String>{'255.255.255.255'};
       for (final ni in await NetworkInterface.list()) {
         if (_isVirtualInterface(ni.name)) continue;
         for (final a in ni.addresses) {
           if (a.type != InternetAddressType.IPv4) continue;
           final parts = a.address.split('.');
           if (parts.length != 4) continue;
-          addrs.add('${parts[0]}.${parts[1]}.${parts[2]}.255');
+          broadcastAddrs.add('${parts[0]}.${parts[1]}.${parts[2]}.255');
         }
       }
+      final unicastAddrs = await _candidateIPs();
       final packet = utf8.encode('LITEREAD_DISCOVER');
       sub = socket.listen((event) {
         if (event != RawSocketEvent.read) return;
@@ -692,18 +770,21 @@ class LanScanner {
           }
         } catch (_) {}
       });
-      // 连发 3 轮广播（约每 700ms 一轮）：首轮包常因 ARP/邻居发现未建立
-      // 或 Wi-Fi 省电被丢弃，多发是 UDP 发现可靠性的关键
+      // 连发 3 轮：广播 + 全网段单播（首轮包常因 ARP/Wi-Fi 省电被丢弃）。
+      // 单播扫射绕过「路由器/AP 隔离拦截广播」的常见故障，可靠性显著更高。
       for (var round = 0; round < 3; round++) {
-        for (final addr in addrs) {
+        for (final addr in broadcastAddrs) {
+          socket.send(packet, InternetAddress(addr), lanSyncPort);
+        }
+        for (final addr in unicastAddrs) {
           socket.send(packet, InternetAddress(addr), lanSyncPort);
         }
         await Future<void>.delayed(const Duration(milliseconds: 700));
       }
-      // 再等 400ms 收尾末轮应答（总时长与原 2.5s 一致）
+      // 再等 400ms 收尾末轮应答
       await Future<void>.delayed(const Duration(milliseconds: 400));
     } catch (_) {
-      // UDP 广播被防火墙拦截时回退 TCP 扫描
+      // UDP 不可用（被防火墙拦截等）时由 TCP 扫描兜底
     } finally {
       unawaited(sub?.cancel());
       socket?.close();
@@ -711,31 +792,12 @@ class LanScanner {
     return out;
   }
 
-  /// TCP 逐 IP 端口扫描本机所在 /24 网段（回退方案）
+  /// TCP 逐 IP 端口探测本机所在 /24 网段（UDP 全挂时的兜底）
   static Future<List<LanDevice>> _tcpScan() async {
     final out = <LanDevice>[];
     final localIps = await allLocalIPv4s();
-
-    // 收集全部物理网卡的 /24 网段前缀（排除虚拟网卡，网段去重）
-    final prefixes = <String>{};
-    try {
-      for (final ni in await NetworkInterface.list()) {
-        if (_isVirtualInterface(ni.name)) continue;
-        for (final a in ni.addresses) {
-          if (a.type != InternetAddressType.IPv4 || a.isLoopback) continue;
-          final parts = a.address.split('.');
-          if (parts.length != 4) continue;
-          prefixes.add('${parts[0]}.${parts[1]}.${parts[2]}');
-        }
-      }
-    } catch (_) {}
-    if (prefixes.isEmpty) return out;
-
-    final candidates = <String>[
-      for (final prefix in prefixes)
-        for (var i = 1; i <= 254; i++)
-          if (!localIps.contains('$prefix.$i')) '$prefix.$i',
-    ];
+    final candidates = await _candidateIPs();
+    if (candidates.isEmpty) return out;
 
     var index = 0;
     Future<void> worker() async {
@@ -754,19 +816,18 @@ class LanScanner {
   }
 
   /// 探测单台设备：TCP 连上且 /api/ping 返回 literead 才算命中。
-  /// 服务端固定端口被占用时会向后顺延（最多 +9），因此逐个尝试端口段；
-  /// 47816 完全连不上说明该 IP 没有 LiteRead（服务端总会优先占住它），跳过。
+  /// 服务端固定端口被占用时会向后顺延（最多 +9），因此探测基础端口后
+  /// 再试一个顺延端口；600ms 连接超时兼顾 Wi-Fi 上的连接建立延迟。
   static Future<LanDevice?> _probe(String ip) async {
-    for (var p = lanSyncPort; p < lanSyncPort + 10; p++) {
+    for (var p = lanSyncPort; p <= lanSyncPort + 1; p++) {
       try {
         final socket = await Socket.connect(
           ip,
           p,
-          timeout: const Duration(milliseconds: 300),
+          timeout: const Duration(milliseconds: 600),
         );
         socket.destroy();
       } catch (_) {
-        if (p == lanSyncPort) return null;
         continue;
       }
       final device = await LanStorePing.ping(ip, p);

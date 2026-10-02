@@ -1,6 +1,7 @@
 import 'dart:ui' as ui;
 
 import 'package:flutter/painting.dart';
+import 'package:flutter/widgets.dart' show SizedBox, WidgetSpan;
 
 import '../ir/book_document.dart';
 
@@ -64,6 +65,8 @@ class LaidOutBlock {
     this.charBase = 0,
     this.prefixChars = 0,
     this.rubyRuns = const [],
+    this.inlineImages = const [],
+    this.justLines,
   });
 
   final int blockIndex;
@@ -97,11 +100,121 @@ class LaidOutBlock {
   /// 振假名注音区间：(块内纯文本起点, 终点, 注音文本)，渲染时绘制在文字上方
   final List<(int, int, String)> rubyRuns;
 
+  /// 行内图片：(块内纯文本起点, 资源 src)。占位盒排版，渲染层绘制真实图片
+  ///（修复注标角标图片显示成「图」占位文本的 bug）
+  final List<(int, String)> inlineImages;
+
+  /// 两端对齐的逐行 painter（字级均布，借鉴 legado TextColumn）；
+  /// null = 未启用逐行对齐（绘制/命中退回块级 painter）
+  final List<JustifiedLine>? justLines;
+
   /// 图片显示高度（仅图片块）
   final double imageHeight = 0;
 
   double get totalHeight =>
       lineHeights.isEmpty ? 0 : lineTops.last + lineHeights.last;
+
+  /// 块 painter 坐标区间 → 以块顶为原点的包围盒。
+  /// 逐行对齐时按行 painter 取盒（与实际绘制像素一致），高亮/选区/行内图片/
+  /// 注音的绘制与命中统一走这里。
+  List<Rect> boxesForRange(int pStart, int pEnd) {
+    final jl = justLines;
+    if (jl == null) {
+      return painter
+          .getBoxesForSelection(
+            TextSelection(baseOffset: pStart, extentOffset: pEnd),
+            boxHeightStyle: ui.BoxHeightStyle.tight,
+          )
+          .map((b) => Rect.fromLTRB(b.left, b.top, b.right, b.bottom))
+          .toList();
+    }
+    final out = <Rect>[];
+    for (final line in jl) {
+      final s = pStart.clamp(line.paintStart, line.paintEnd);
+      final e = pEnd.clamp(line.paintStart, line.paintEnd);
+      if (s >= e) continue;
+      final boxes = line.painter.getBoxesForSelection(
+        TextSelection(
+          baseOffset: s - line.paintStart,
+          extentOffset: e - line.paintStart,
+        ),
+        boxHeightStyle: ui.BoxHeightStyle.tight,
+      );
+      for (final b in boxes) {
+        out.add(
+          Rect.fromLTRB(b.left, line.top + b.top, b.right, line.top + b.bottom),
+        );
+      }
+    }
+    return out;
+  }
+
+  /// 以块顶为原点的坐标 → painter 文本偏移（调用方负责剔除前缀）。
+  /// 逐行对齐时先按 y 定位行，再在行 painter 内精确命中。
+  int? paintedCharAt(Offset local) {
+    final jl = justLines;
+    if (jl == null) return painter.getPositionForOffset(local).offset;
+    JustifiedLine? best;
+    var bestDist = double.infinity;
+    for (final line in jl) {
+      if (local.dy >= line.top && local.dy < line.top + line.height) {
+        best = line;
+        break;
+      }
+      final d = (local.dy - (line.top + line.height / 2)).abs();
+      if (d < bestDist) {
+        bestDist = d;
+        best = line;
+      }
+    }
+    if (best == null) return null;
+    return best.paintStart +
+        best.painter
+            .getPositionForOffset(Offset(local.dx, best.height / 2))
+            .offset;
+  }
+}
+
+/// 两端对齐的单行排版结果：按剩余宽度微调字距（字级均布）后的行 painter
+class JustifiedLine {
+  const JustifiedLine({
+    required this.painter,
+    required this.paintStart,
+    required this.paintEnd,
+    required this.top,
+    required this.height,
+  });
+
+  final TextPainter painter;
+
+  /// 本行在块 painter 文本坐标中的起止偏移（含前缀）
+  final int paintStart;
+  final int paintEnd;
+
+  /// 行顶相对块顶的 y 偏移与行高
+  final double top;
+  final double height;
+}
+
+/// 排版段：块内一段等样式文本或图片占位（块级与逐行 painter 共用）
+class _LayoutSeg {
+  const _LayoutSeg(this.start, this.text, this.color, {this.letterSpacing = 0})
+    : isPlaceholder = false,
+      placeholderSize = Size.zero;
+
+  const _LayoutSeg.ph(this.start, this.text, this.placeholderSize)
+    : color = const ui.Color(0x00000000),
+      letterSpacing = 0,
+      isPlaceholder = true;
+
+  final int start;
+  final String text;
+  final ui.Color color;
+  final double letterSpacing;
+  final bool isPlaceholder;
+  final Size placeholderSize;
+
+  int get end => start + text.length;
 }
 
 /// 页内渲染单元：某块的第 [firstLine, firstLine+lineCount) 行
@@ -362,7 +475,6 @@ class TextPaginator {
     var color = styles.foreground;
     var letterSpacing = cfg.letterSpacing;
     var height = cfg.lineHeight;
-    var align = cfg.justify ? TextAlign.justify : TextAlign.left;
     var fontFamily = cfg.fontFamily;
 
     switch (block.type) {
@@ -371,7 +483,6 @@ class TextPaginator {
         fontSize = cfg.fontSize * scale;
         fontWeight = FontWeight.w700;
         height = 1.35;
-        align = TextAlign.left;
         break;
       case BlockType.listItem:
         final marker = block.listMarker ?? -1;
@@ -386,7 +497,6 @@ class TextPaginator {
         fontFamily = 'monospace';
         fontSize = cfg.fontSize * 0.88;
         height = 1.4;
-        align = TextAlign.left;
         letterSpacing = 0;
         break;
       case BlockType.blockquote:
@@ -413,62 +523,77 @@ class TextPaginator {
       indentWidth = cfg.indentChars * fontSize;
     }
 
-    // 构建 span
-    final spans = <InlineSpan>[];
-    for (final run in block.spans) {
-      var runColor = color;
-      if (run.hasLink) runColor = styles.accent;
-      // 注标（脚注引用）：强调色提示可点
-      if (run.hasNoteref) runColor = styles.accent;
-      spans.add(
-        TextSpan(
-          text: run.text,
-          style: TextStyle(
-            color: runColor,
-            fontSize: fontSize,
-            fontWeight: fontWeight,
-            height: height,
-            letterSpacing: letterSpacing,
-            fontFamily: fontFamily,
-            fontFamilyFallback: styles.fontFallbacks,
-          ),
+    // 构建排版段：前缀 + 逐 run；行内图片 run 转为占位段（先按宽高比占盒，
+    // 渲染层在占位盒内绘制真实图片，修复角标图片显示成「图」文本的 bug）
+    final segs = <_LayoutSeg>[];
+    final placeholderSizes = <Size>[];
+    final inlineImages = <(int, String)>[];
+    if (prefix.isNotEmpty) {
+      segs.add(
+        _LayoutSeg(
+          0,
+          prefix,
+          prefixTransparent ? const ui.Color(0x00000000) : color,
+          letterSpacing: letterSpacing,
         ),
       );
     }
-    if (prefix.isNotEmpty) {
-      spans.insert(
-        0,
-        TextSpan(
-          text: prefix,
-          style: TextStyle(
-            // 透明缩进前缀：占位但不参与两端对齐的空白拉伸
-            color: prefixTransparent ? const ui.Color(0x00000000) : color,
-            fontSize: fontSize,
-            fontWeight: fontWeight,
-            height: height,
+    var runOffset = 0;
+    for (final run in block.spans) {
+      if (run.isImage && run.imageSrc!.isNotEmpty) {
+        final src = run.imageSrc!;
+        final aspect = imageAspects[src] ?? 0.72; // w/h，未知用默认
+        final phH = fontSize * 0.95;
+        final phW = (phH * aspect).clamp(fontSize * 0.45, fontSize * 2.2);
+        final size = Size(phW, phH);
+        segs.add(_LayoutSeg.ph(prefix.length + runOffset, run.text, size));
+        placeholderSizes.add(size);
+        inlineImages.add((runOffset, src));
+      } else {
+        var runColor = color;
+        if (run.hasLink) runColor = styles.accent;
+        // 注标（脚注引用）：强调色提示可点
+        if (run.hasNoteref) runColor = styles.accent;
+        segs.add(
+          _LayoutSeg(
+            prefix.length + runOffset,
+            run.text,
+            runColor,
             letterSpacing: letterSpacing,
-            fontFamily: fontFamily,
           ),
-        ),
-      );
+        );
+      }
+      runOffset += run.text.length;
     }
 
     // 振假名注音区间（块内纯文本坐标，渲染层绘制在文字上方）
     final rubyRuns = <(int, int, String)>[];
-    var runOffset = 0;
+    var rubyOffset = 0;
     for (final run in block.spans) {
       final len = run.text.length;
       final rb = run.ruby;
       if (rb != null && rb.isNotEmpty && len > 0) {
-        rubyRuns.add((runOffset, runOffset + len, rb));
+        rubyRuns.add((rubyOffset, rubyOffset + len, rb));
       }
-      runOffset += len;
+      rubyOffset += len;
     }
 
     final tp = TextPainter(
-      text: TextSpan(children: spans),
+      text: TextSpan(
+        children: _segSpans(
+          segs,
+          fontSize: fontSize,
+          height: height,
+          fontWeight: fontWeight,
+          fontFamily: fontFamily,
+          fontFallbacks: styles.fontFallbacks,
+        ),
+      ),
       textDirection: TextDirection.ltr,
-      textAlign: align,
+      // 两端对齐由逐行 painter（_buildJustifiedLines）实现：块级 painter
+      // 恒为左对齐，只负责断行与坐标映射（内建 justify 只拉伸空格，
+      // 中文行右缘参差；字级均布才能右缘对齐，借鉴 legado TextColumn）
+      textAlign: TextAlign.left,
       // 强制等高 strut：行高不再随行内字符（中文/西文/数字/表情等回退字体）变化。
       // 否则西文字体回退会让某些行高 2–3px，整页累积后末行位置忽上忽下；
       // 固定后每行高度恒为 fontSize × height，页末行始终落在同一网格线上。
@@ -481,6 +606,17 @@ class TextPaginator {
         forceStrutHeight: true,
       ),
     );
+    // 行内图片占位尺寸：按出现顺序注入（WidgetSpan 纯文本化为 U+FFFC，
+    // 与 run.text 一致，字符坐标不受影响）
+    if (placeholderSizes.isNotEmpty) {
+      tp.setPlaceholderDimensions([
+        for (final d in placeholderSizes)
+          PlaceholderDimensions(
+            size: d,
+            alignment: PlaceholderAlignment.middle,
+          ),
+      ]);
+    }
     final availWidth = cfg.contentWidth - quoteIndent - listIndent;
 
     // 按给定宽度排版并提取逐行信息（孤行控制会二次排版，抽成闭包复用）
@@ -518,6 +654,25 @@ class TextPaginator {
       }
     }
 
+    // 两端对齐：按最终断行结果构建逐行 painter（字级均布，末行不拉伸）。
+    // 必须在孤行控制二次排版之后调用，保证与最终绘制像素一致
+    final justLines = _buildJustifiedLines(
+      tp,
+      segs,
+      lineStartChars,
+      lineTops,
+      lineHeights,
+      cfg,
+      availWidth,
+      prefix.length,
+      block,
+      fontSize: fontSize,
+      lineHeight: height,
+      fontWeight: fontWeight,
+      fontFamily: fontFamily,
+      fontFallbacks: styles.fontFallbacks,
+    );
+
     // 段前间距：标题前更大；正文段落取 paragraphSpacing × 整行高
     // （默认 0.85 行，配合 1.65 行距达到舒适的阅读密度）。
     // 行网格量化：段前距对齐到整数行——正文行高已由 strut 恒定，
@@ -553,7 +708,181 @@ class TextPaginator {
       charBase: charBase,
       prefixChars: prefix.length,
       rubyRuns: rubyRuns,
+      inlineImages: inlineImages,
+      justLines: justLines,
     );
+  }
+
+  /// 段列表 → span 树（块级与逐行 painter 共用；占位段为图片预留空间）
+  List<InlineSpan> _segSpans(
+    List<_LayoutSeg> segs, {
+    required double fontSize,
+    required double height,
+    required FontWeight fontWeight,
+    required String? fontFamily,
+    required List<String> fontFallbacks,
+  }) {
+    return [
+      for (final seg in segs)
+        if (seg.isPlaceholder)
+          WidgetSpan(
+            alignment: PlaceholderAlignment.middle,
+            baseline: TextBaseline.alphabetic,
+            child: SizedBox(
+              width: seg.placeholderSize.width,
+              height: seg.placeholderSize.height,
+            ),
+          )
+        else
+          TextSpan(
+            text: seg.text,
+            style: TextStyle(
+              color: seg.color,
+              fontSize: fontSize,
+              fontWeight: fontWeight,
+              height: height,
+              letterSpacing: seg.letterSpacing,
+              fontFamily: fontFamily,
+              fontFamilyFallback: fontFallbacks,
+            ),
+          ),
+    ];
+  }
+
+  /// 两端对齐：对 [painter]（已按最终宽度排版）的每一非末行构建
+  /// 字级均布的行 painter——把行宽与可用宽度之差摊到行内每个字距上，
+  /// 中文右缘也能对齐（内建 justify 只拉伸空格，对 CJK 无效）。
+  ///
+  /// 末行与放不下均布的行（字距增量大）不拉伸；前缀段（缩进/标号）
+  /// 不参与拉伸，保持缩进稳定。仅段落/引用/列表启用。
+  List<JustifiedLine>? _buildJustifiedLines(
+    TextPainter painter,
+    List<_LayoutSeg> segs,
+    List<int> lineStartChars,
+    List<double> lineTops,
+    List<double> lineHeights,
+    LayoutConfig cfg,
+    double availWidth,
+    int prefixLen,
+    Block block, {
+    required double fontSize,
+    required double lineHeight,
+    required FontWeight fontWeight,
+    required String? fontFamily,
+    required List<String> fontFallbacks,
+  }) {
+    if (!cfg.justify) return null;
+    switch (block.type) {
+      case BlockType.paragraph:
+      case BlockType.blockquote:
+      case BlockType.listItem:
+        break;
+      default:
+        return null;
+    }
+    final n = lineStartChars.length;
+    if (n < 2) return null; // 单行无需两端对齐
+
+    final metrics = painter.computeLineMetrics();
+    final plainLen = block.plainText.length;
+    // 前缀段在 segs 中的下标（不参与拉伸）
+    final prefixSegIdx =
+        prefixLen > 0 && segs.isNotEmpty && segs.first.start == 0 ? 0 : -1;
+
+    final out = <JustifiedLine>[];
+    for (var i = 0; i < n; i++) {
+      final isLast = i == n - 1;
+      final paintStart = i == 0 ? 0 : prefixLen + lineStartChars[i];
+      var paintEnd = isLast
+          ? prefixLen + plainLen
+          : prefixLen + lineStartChars[i + 1];
+      if (paintEnd < paintStart) paintEnd = paintStart;
+
+      // 行宽缺口：只对非末行做字距均布
+      var extra = 0.0;
+      if (!isLast) {
+        final deficit = availWidth - metrics[i].width;
+        if (deficit > 0.5) {
+          var contentChars = 0;
+          for (final seg in segs) {
+            if (seg.isPlaceholder) continue;
+            final s = seg.start.clamp(paintStart, paintEnd);
+            final e = seg.end.clamp(paintStart, paintEnd);
+            contentChars += e - s;
+          }
+          if (contentChars >= 2) {
+            extra = deficit / contentChars;
+            // 缺口过大（行内字符太少或行很短）：强拉会明显松散，放弃
+            if (extra > cfg.fontSize * 0.55) extra = 0;
+          }
+        }
+      }
+
+      // 裁剪段到本行区间，重建行 span 树
+      final lineSegs = <_LayoutSeg>[];
+      final linePhSizes = <Size>[];
+      var cursor = 0;
+      for (var si = 0; si < segs.length; si++) {
+        final seg = segs[si];
+        final s = seg.start.clamp(paintStart, paintEnd);
+        final e = seg.end.clamp(paintStart, paintEnd);
+        if (e <= s) continue;
+        if (seg.isPlaceholder) {
+          lineSegs.add(_LayoutSeg.ph(cursor, seg.text, seg.placeholderSize));
+          linePhSizes.add(seg.placeholderSize);
+          cursor += seg.text.length;
+        } else {
+          var ls = seg.letterSpacing;
+          if (extra > 0 && si != prefixSegIdx) ls += extra;
+          final text = seg.text.substring(s - seg.start, e - seg.start);
+          lineSegs.add(_LayoutSeg(cursor, text, seg.color, letterSpacing: ls));
+          cursor += text.length;
+        }
+      }
+
+      final lp = TextPainter(
+        text: TextSpan(
+          children: _segSpans(
+            lineSegs,
+            fontSize: fontSize,
+            height: lineHeight,
+            fontWeight: fontWeight,
+            fontFamily: fontFamily,
+            fontFallbacks: fontFallbacks,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+        textAlign: TextAlign.left,
+        strutStyle: StrutStyle(
+          fontSize: fontSize,
+          height: lineHeight,
+          fontWeight: fontWeight,
+          fontFamily: fontFamily,
+          fontFamilyFallback: fontFallbacks,
+          forceStrutHeight: true,
+        ),
+      );
+      if (linePhSizes.isNotEmpty) {
+        lp.setPlaceholderDimensions([
+          for (final d in linePhSizes)
+            PlaceholderDimensions(
+              size: d,
+              alignment: PlaceholderAlignment.middle,
+            ),
+        ]);
+      }
+      lp.layout(maxWidth: double.infinity);
+      out.add(
+        JustifiedLine(
+          painter: lp,
+          paintStart: paintStart,
+          paintEnd: paintEnd,
+          top: lineTops[i],
+          height: lineHeights[i],
+        ),
+      );
+    }
+    return out;
   }
 
   /// 块能否在页边界处按行切分：正文/引用/列表/代码可以；

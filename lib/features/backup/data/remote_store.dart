@@ -604,6 +604,34 @@ class LanStore extends RemoteStore {
     }
   }
 
+  /// 把本机同步进度推送给对端展示（双方进度）。
+  /// fire-and-forget：失败静默，短超时不阻塞同步主流程。
+  Future<void> postSyncProgress({
+    required String phase,
+    required int done,
+    required int total,
+    bool finished = false,
+  }) async {
+    try {
+      final req = await _client.postUrl(_uri('sync-progress'));
+      req.headers.contentType = ContentType.json;
+      req.add(
+        utf8.encode(
+          jsonEncode({
+            'phase': phase,
+            'done': done,
+            'total': total,
+            'finished': finished,
+          }),
+        ),
+      );
+      final res = await req.close().timeout(const Duration(seconds: 3));
+      await res.drain<void>().timeout(const Duration(seconds: 3));
+    } catch (_) {
+      // 进度推送失败不影响同步
+    }
+  }
+
   /// 读取对端备份清单（同步确认前对比差异用）
   Future<Map<String, dynamic>?> fetchManifest() async {
     final raw = await getFile('manifest.json');

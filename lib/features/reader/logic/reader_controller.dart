@@ -395,26 +395,38 @@ class ReaderController extends Notifier<ReaderState> {
 
   Future<void> _loadImageAspects(BookDocument doc, int spineIndex) async {
     for (final block in doc.spine[spineIndex].blocks) {
-      if (block.type != BlockType.image) continue;
-      final src = block.imageSrc;
-      if (src == null || _imageAspects.containsKey(src)) continue;
-      try {
-        final data = await doc.resources.get(src);
-        if (data == null || data.isEmpty) {
-          _imageAspects[src] = 0.72;
-          continue;
-        }
-        final codec = await ui.instantiateImageCodec(
-          Uint8List.fromList(data),
-          targetWidth: 24,
-        );
-        final frame = await codec.getNextFrame();
-        _imageAspects[src] = frame.image.width / frame.image.height;
-        frame.image.dispose();
-        codec.dispose();
-      } catch (_) {
-        _imageAspects[src] = 0.72;
+      // 块级图片
+      if (block.type == BlockType.image && block.imageSrc != null) {
+        await _loadAspect(doc, block.imageSrc!);
       }
+      // 行内图片（注标角标图/段内插图）：分页时按宽高比占位
+      for (final run in block.spans) {
+        final src = run.imageSrc;
+        if (src != null && src.isNotEmpty) {
+          await _loadAspect(doc, src);
+        }
+      }
+    }
+  }
+
+  Future<void> _loadAspect(BookDocument doc, String src) async {
+    if (_imageAspects.containsKey(src)) return;
+    try {
+      final data = await doc.resources.get(src);
+      if (data == null || data.isEmpty) {
+        _imageAspects[src] = 0.72;
+        return;
+      }
+      final codec = await ui.instantiateImageCodec(
+        Uint8List.fromList(data),
+        targetWidth: 24,
+      );
+      final frame = await codec.getNextFrame();
+      _imageAspects[src] = frame.image.width / frame.image.height;
+      frame.image.dispose();
+      codec.dispose();
+    } catch (_) {
+      _imageAspects[src] = 0.72;
     }
   }
 

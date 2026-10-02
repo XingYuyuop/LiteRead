@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -32,6 +33,9 @@ class _BackupPageState extends ConsumerState<BackupPage> {
   bool _scanning = false;
   List<LanDevice> _devices = const [];
   bool _sharing = false;
+
+  /// 最近连接成功的设备（扫描不到时一键重连，免手输 IP）
+  List<LanDevice> _recentDevices = const [];
 
   late final TextEditingController _localPathCtrl;
   late final TextEditingController _lanAddrCtrl;
@@ -82,6 +86,9 @@ class _BackupPageState extends ConsumerState<BackupPage> {
     final cfg = await BackupConfig.load(ref.read(appDatabaseProvider));
     final defPath = await defaultBackupPath();
     if (!mounted) return;
+    final sharing = ref.read(lanSyncServerProvider).running;
+    final recent = await _loadRecentDevices();
+    if (!mounted) return;
     setState(() {
       _cfg = cfg;
       _localPathCtrl.text = cfg.localPath;
@@ -94,9 +101,58 @@ class _BackupPageState extends ConsumerState<BackupPage> {
       _s3KeyCtrl.text = cfg.s3AccessKey;
       _s3SecretCtrl.text = cfg.s3SecretKey;
       _s3RegionCtrl.text = cfg.s3Region;
-      _sharing = ref.read(lanSyncServerProvider).running;
+      _sharing = sharing;
+      _recentDevices = recent;
     });
     _autoScanIfNeeded();
+  }
+
+  /// 读取最近连接设备历史（backup.lanHistory）
+  Future<List<LanDevice>> _loadRecentDevices() async {
+    try {
+      final raw = await ref
+          .read(appDatabaseProvider)
+          .getSetting('backup.lanHistory');
+      if (raw == null || raw.isEmpty) return const [];
+      final list = (jsonDecode(raw) as List)
+          .cast<Map<String, dynamic>>()
+          .map(
+            (j) => LanDevice(
+              address: j['address'] as String? ?? '',
+              port: (j['port'] as num?)?.toInt() ?? lanSyncPort,
+              name: j['name'] as String? ?? '未知设备',
+            ),
+          )
+          .where((d) => d.address.isNotEmpty)
+          .toList();
+      return list;
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// 连接成功后记住设备（最多 6 台，按地址去重，最新在前）
+  Future<void> _rememberDevice(LanDevice d) async {
+    try {
+      final key = '${d.address}:${d.port}';
+      final kept = [
+        d,
+        for (final r in _recentDevices)
+          if ('${r.address}:${r.port}' != key) r,
+      ].take(6).toList();
+      if (mounted) {
+        setState(() => _recentDevices = kept);
+      }
+      await ref
+          .read(appDatabaseProvider)
+          .setSetting(
+            'backup.lanHistory',
+            jsonEncode([
+              for (final r in kept)
+                {'address': r.address, 'port': r.port, 'name': r.name},
+            ]),
+          );
+    } catch (_) {}
   }
 
   void _update(BackupConfig Function(BackupConfig) fn) {
@@ -513,6 +569,7 @@ class _BackupPageState extends ConsumerState<BackupPage> {
     try {
       store = LanStore(d.address, d.port);
       diff = await svc.diffWithRemote(store);
+      await _rememberDevice(d);
     } catch (e) {
       await store?.dispose();
       if (mounted) setState(() => _busy = false);
@@ -542,25 +599,63 @@ class _BackupPageState extends ConsumerState<BackupPage> {
       _busyText = '正在与 ${d.name} 同步…';
       _resetProgress();
     });
+    // 进度弹窗与备份/恢复一致（任务：同步过程与备份进度 UI 统一）
+    final prog = _OpProgress();
+    String resultMsg;
     try {
-      final r = await svc.applyLanDiff(
-        store,
-        diff,
-        pull: plan.pull,
-        push: plan.push,
-        deleteLocalIds: plan.deleteLocalIds.toList(),
-        deleteRemoteIds: plan.deleteRemoteIds.toList(),
-        onProgress: _onProgress,
-      );
-      _toast('同步完成：${r.summary()}');
+      final shown = _showProgressDialog('同步', prog);
+      try {
+        final r = await svc.applyLanDiff(
+          store,
+          diff,
+          pull: plan.pull,
+          push: plan.push,
+          deleteLocalIds: plan.deleteLocalIds.toList(),
+          deleteRemoteIds: plan.deleteRemoteIds.toList(),
+          onProgress: (done, total, phase) {
+            prog.update(done, total, phase);
+            _onProgress(done, total, phase);
+            // 双方进度：把本机进度推送给对端展示（任务：双方设备都有同步进度）
+            if (store is LanStore) {
+              _postPeerProgress(store, phase, done, total);
+            }
+          },
+        );
+        resultMsg = '同步完成：${r.summary()}';
+      } finally {
+        await _closeProgressDialog(shown);
+      }
     } catch (e) {
-      _toast('同步失败：$e');
+      resultMsg = '同步失败：$e';
     } finally {
+      prog.dispose();
       await store.dispose();
       if (mounted) {
         setState(() => _busy = false);
       }
     }
+    _toast(resultMsg);
+  }
+
+  /// 把本机同步进度推送给对端（fire-and-forget，失败静默）。
+  /// 300ms 节流；结束时发送 finished 让对端收尾。
+  DateTime _lastPeerPost = DateTime.fromMillisecondsSinceEpoch(0);
+  Future<void> _postPeerProgress(
+    LanStore store,
+    String phase,
+    int done,
+    int total,
+  ) async {
+    final now = DateTime.now();
+    final finished = total > 0 && done >= total;
+    if (!finished && now.difference(_lastPeerPost).inMilliseconds < 300) return;
+    _lastPeerPost = now;
+    await store.postSyncProgress(
+      phase: phase,
+      done: done,
+      total: total,
+      finished: finished,
+    );
   }
 
   /// 同步确认对话框：拉取 / 推送 / 删除本机多余 / 删除远端指定
@@ -1043,6 +1138,50 @@ class _BackupPageState extends ConsumerState<BackupPage> {
         value: _sharing,
         onChanged: _busy ? null : _toggleSharing,
       ),
+      // 对端同步进度：本机作为接收方实时展示（双方设备都有进度显示）
+      if (_sharing)
+        ValueListenableBuilder<LanSyncProgress?>(
+          valueListenable: server.syncProgress,
+          builder: (ctx, p, _) {
+            if (p == null) return const SizedBox.shrink();
+            return Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          p.phase.isEmpty ? '对端正在同步…' : '对端：${p.phase}',
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                      ),
+                      Text(
+                        p.total > 0 ? '${p.done}/${p.total}' : '',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontFeatures: [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  LinearProgressIndicator(
+                    value: p.total > 0 ? p.value : null,
+                    minHeight: 3,
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
       ListTile(
         leading: _scanning
             ? const SizedBox(
@@ -1104,6 +1243,24 @@ class _BackupPageState extends ConsumerState<BackupPage> {
           trailing: const Icon(Icons.sync_outlined),
           onTap: _busy ? null : () => _confirmSyncWithDevice(d),
         ),
+      // 最近连接设备：扫描不到时一键重连（免手输 IP）
+      for (final d in _recentDevices)
+        if (!_devices.any((x) => x.address == d.address && x.port == d.port))
+          ListTile(
+            dense: true,
+            leading: Icon(
+              _cfg.lanAddress == d.address && _cfg.lanPort == d.port
+                  ? Icons.history
+                  : Icons.history_outlined,
+              color: _cfg.lanAddress == d.address && _cfg.lanPort == d.port
+                  ? Theme.of(context).colorScheme.primary
+                  : null,
+            ),
+            title: Text(d.name),
+            subtitle: Text('最近连接 · ${d.address}:${d.port}'),
+            trailing: const Icon(Icons.sync_outlined),
+            onTap: _busy ? null : () => _confirmSyncWithDevice(d),
+          ),
       if (_cfg.lanAddress.isNotEmpty)
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),

@@ -496,6 +496,7 @@ List<InlineRun> _inlineRuns(dom.Node node) {
             flags: {...r.flags, InlineFlag.noteref},
             ruby: r.ruby,
             refId: refId,
+            imageSrc: r.imageSrc,
           ),
         );
       }
@@ -513,7 +514,13 @@ List<InlineRun> _inlineRuns(dom.Node node) {
         node.attributes['src'] ??
         node.attributes['xlink:href'] ??
         node.attributes['href'];
-    return [InlineRun(src != null ? '［图］' : '')];
+    final resolved = src == null || src.isEmpty ? null : _resolveSrc(src);
+    if (resolved != null) {
+      // 行内图片（含注标角标图）：占位符 run，渲染层绘制真实图片，
+      // 修复角标图片显示成「［图］」文本的 bug
+      return [InlineRun('\uFFFC', imageSrc: resolved)];
+    }
+    return const [InlineRun('')];
   }
   if (tag == 'ruby') {
     // <ruby>漢<rt>かん</rt></ruby>：base 文本 + rt 注音

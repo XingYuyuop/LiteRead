@@ -55,6 +55,15 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
 
   bool get _selecting => _selStart != null && _selEnd != null;
 
+  // ---- 全文搜索 ----
+  bool _searchVisible = false;
+  bool _searching = false;
+  List<_SearchHit> _searchResults = const [];
+  int _searchIndex = -1; // 当前命中下标
+  final TextEditingController _searchCtrl = TextEditingController();
+  final FocusNode _searchFocus = FocusNode();
+  static const _searchLimit = 500; // 命中条数上限
+
   @override
   void initState() {
     super.initState();
@@ -102,6 +111,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
   void dispose() {
     imageLoadedTick.removeListener(_onImageLoaded);
     _keyboardFocus.dispose();
+    _searchCtrl.dispose();
+    _searchFocus.dispose();
     _cornerTimer?.cancel();
     _batterySub?.cancel();
     // 移动端：离开阅读页恢复系统栏
@@ -235,6 +246,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
             ),
             // 菜单浮层
             if (_menuVisible) _buildMenu(state, settings, spec, isDark),
+            // 全文搜索面板（与菜单互斥）
+            if (!_menuVisible && _searchVisible) _buildSearchBar(spec),
             // 批注操作条（划词选择中 / 编辑已有批注）
             if (!_menuVisible && (_selecting || _activeHighlight != null))
               _buildSelectionOverlay(spec, areaSize),
@@ -285,6 +298,17 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
   void _onKey(KeyEvent event) {
     if (event is! KeyDownEvent) return;
     final controller = ref.read(readerControllerProvider.notifier);
+    // 全文搜索面板：ESC 关闭，F3 上下条导航（输入框聚焦时事件冒泡到此处）
+    if (_searchVisible) {
+      if (event.logicalKey == LogicalKeyboardKey.escape) {
+        _closeSearch();
+      } else if (event.logicalKey == LogicalKeyboardKey.f3) {
+        _stepHit(HardwareKeyboard.instance.isShiftPressed ? -1 : 1);
+      } else if (event.logicalKey == LogicalKeyboardKey.enter) {
+        _runSearch(_searchCtrl.text);
+      }
+      return;
+    }
     if (_menuVisible) {
       if (event.logicalKey == LogicalKeyboardKey.escape) {
         _closeMenu();
@@ -342,6 +366,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
       Navigator.of(context).maybePop();
     } else if (key == LogicalKeyboardKey.f11) {
       _toggleFullscreen();
+    } else if (ctrl && key == LogicalKeyboardKey.keyF) {
+      // Ctrl+F：全文搜索
+      _openSearch();
     } else if (key == LogicalKeyboardKey.contextMenu ||
         key == LogicalKeyboardKey.keyM) {
       setState(() => _menuVisible = true);
@@ -399,6 +426,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
                 margins: _effMargins,
                 resources: doc.resources,
                 marks: _marksFor(s.spineIndex, page),
+                searchMarks: _searchMarksFor(s.spineIndex, page),
                 selection: _selecting
                     ? (
                         _selStart! < _selEnd! ? _selStart! : _selEnd!,
@@ -415,6 +443,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
       onNext: () => controller.nextPage(),
       onPrev: () => controller.prevPage(),
       onTapCenter: _onCenterTap,
+      onTapProbe: _onTapProbe,
       selecting: _selecting || _activeHighlight != null,
       onLongPressStart: _onSelectStart,
       onLongPressMoveUpdate: _onSelectMove,
@@ -442,6 +471,116 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
       );
     }
     return marks;
+  }
+
+  // ---- 全文搜索 ----
+
+  /// 当前页的搜索命中（供 PageCanvas 圆角高亮；当前命中加深+描边）
+  List<PageMark> _searchMarksFor(int spineIndex, PageBox page) {
+    if (_searchResults.isEmpty) return const [];
+    final len = _searchCtrl.text.length;
+    if (len == 0) return const [];
+    final marks = <PageMark>[];
+    for (var i = 0; i < _searchResults.length; i++) {
+      final h = _searchResults[i];
+      if (h.spineIndex != spineIndex) continue;
+      final end = h.charOffset + len;
+      if (end <= page.startChar || h.charOffset >= page.endChar) continue;
+      marks.add(
+        PageMark(
+          start: h.charOffset,
+          end: end,
+          colorIndex: 0,
+          styleIndex: i == _searchIndex ? 1 : 0,
+        ),
+      );
+    }
+    return marks;
+  }
+
+  void _openSearch() {
+    setState(() {
+      _menuVisible = false;
+      _menuTab = null;
+      _searchVisible = true;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _searchFocus.requestFocus();
+    });
+  }
+
+  void _closeSearch() {
+    setState(() {
+      _searchVisible = false;
+      _searching = false;
+      _searchResults = const [];
+      _searchIndex = -1;
+    });
+    _keyboardFocus.requestFocus();
+  }
+
+  /// 全书搜索：大小写不敏感，逐章扫描（章间让出事件循环防卡顿），
+  /// 命中上限 [_searchLimit] 条。完成后跳到第一条命中。
+  Future<void> _runSearch(String query) async {
+    final q = query.trim();
+    final doc = ref.read(readerControllerProvider).document;
+    if (q.isEmpty || doc == null) {
+      setState(() {
+        _searchResults = const [];
+        _searchIndex = -1;
+      });
+      return;
+    }
+    setState(() => _searching = true);
+    final lower = q.toLowerCase();
+    final hits = <_SearchHit>[];
+    for (var si = 0; si < doc.spine.length; si++) {
+      final plain = doc.spine[si].plainText;
+      final text = plain.toLowerCase();
+      var from = 0;
+      while (hits.length < _searchLimit) {
+        final idx = text.indexOf(lower, from);
+        if (idx < 0) break;
+        hits.add(_SearchHit(si, idx, _snippetOf(plain, idx, q.length)));
+        from = idx + q.length;
+      }
+      if (hits.length >= _searchLimit) break;
+      // 章间让出事件循环，超长书扫描不冻结 UI
+      await Future<void>.delayed(Duration.zero);
+      if (!_searchVisible) return; // 面板已被关闭，丢弃结果
+    }
+    if (!mounted) return;
+    setState(() {
+      _searchResults = hits;
+      _searchIndex = hits.isEmpty ? -1 : 0;
+      _searching = false;
+    });
+    if (hits.isNotEmpty) _gotoHit(0);
+  }
+
+  /// 命中上下文摘要（前后各取若干字符）
+  String _snippetOf(String plain, int idx, int len) {
+    final start = (idx - 12).clamp(0, plain.length);
+    final end = (idx + len + 18).clamp(0, plain.length);
+    final body = plain.substring(start, end).replaceAll('\n', ' ');
+    return '${start > 0 ? '…' : ''}$body${end < plain.length ? '…' : ''}';
+  }
+
+  void _gotoHit(int idx) {
+    if (idx < 0 || idx >= _searchResults.length) return;
+    setState(() => _searchIndex = idx);
+    final h = _searchResults[idx];
+    ref
+        .read(readerControllerProvider.notifier)
+        .jumpToChar(h.spineIndex, h.charOffset);
+  }
+
+  void _stepHit(int delta) {
+    if (_searchResults.isEmpty) return;
+    var next = _searchIndex + delta;
+    if (next < 0) next = _searchResults.length - 1;
+    if (next >= _searchResults.length) next = 0;
+    _gotoHit(next);
   }
 
   /// 长按起点：命中图片 → 查看大图；否则定位章内字符并开始选择
@@ -536,6 +675,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
       });
       return;
     }
+    // 命中已有批注：进入编辑态（仅限中部点按，左右热区保持翻页）
     final char = _hitTestChar(local);
     if (char != null) {
       final s = ref.read(readerControllerProvider);
@@ -547,21 +687,29 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
           return;
         }
       }
-      // 注标命中：弹出脚注内容（EPUB noteref）
-      final doc = s.document;
-      if (doc != null && s.spineIndex >= 0 && s.spineIndex < doc.spine.length) {
-        final run = doc.spine[s.spineIndex].inlineRunAt(char);
-        final refId = run?.refId;
-        if (refId != null) {
-          final fn = _findFootnote(doc, refId, s.spineIndex);
-          if (fn != null) {
-            _showFootnote(fn);
-            return;
-          }
-        }
-      }
     }
+    if (_onTapProbe(local)) return;
     setState(() => _menuVisible = !_menuVisible);
+  }
+
+  /// 点按预检：命中注标（EPUB noteref）弹脚注并消费点按。
+  /// 在左右翻页热区同样生效——修复角标处于翻页位置时点击不到的 bug。
+  bool _onTapProbe(Offset local) {
+    if (_selecting || _activeHighlight != null) return false;
+    final char = _hitTestChar(local);
+    if (char == null) return false;
+    final s = ref.read(readerControllerProvider);
+    final doc = s.document;
+    if (doc == null || s.spineIndex < 0 || s.spineIndex >= doc.spine.length) {
+      return false;
+    }
+    final run = doc.spine[s.spineIndex].inlineRunAt(char);
+    final refId = run?.refId;
+    if (refId == null) return false;
+    final fn = _findFootnote(doc, refId, s.spineIndex);
+    if (fn == null) return false;
+    _showFootnote(fn);
+    return true;
   }
 
   // ---- 脚注（EPUB 注标） ----
@@ -894,6 +1042,177 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
 
   // ---- 菜单浮层：底部选项栏（左起：目录/阅读主题/翻页动画/排版）+ 可折叠面板 ----
 
+  /// 全文搜索面板：顶部悬浮（输入框 + i/n 计数 + 上下条导航 + 结果列表）。
+  /// ESC 关闭；Enter 搜索；结果点按跳转对应位置。
+  Widget _buildSearchBar(ReaderThemeSpec spec) {
+    final fg = spec.foreground;
+    final overlayColor = spec.background.withValues(alpha: 0.97);
+    final count = _searchResults.isEmpty
+        ? ''
+        : '${_searchIndex + 1}/${_searchResults.length}${_searchResults.length >= _searchLimit ? '+' : ''}';
+    return Positioned(
+      left: 0,
+      right: 0,
+      top: 0,
+      child: Material(
+        color: Colors.transparent,
+        child: Container(
+          decoration: BoxDecoration(
+            color: overlayColor,
+            borderRadius: const BorderRadius.vertical(
+              bottom: Radius.circular(16),
+            ),
+            border: Border(
+              bottom: BorderSide(color: spec.secondary.withValues(alpha: 0.15)),
+            ),
+          ),
+          padding: const EdgeInsets.fromLTRB(12, 10, 8, 8),
+          child: SafeArea(
+            bottom: false,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _searchCtrl,
+                        focusNode: _searchFocus,
+                        style: TextStyle(color: fg, fontSize: 15),
+                        textInputAction: TextInputAction.search,
+                        onSubmitted: (_) => _runSearch(_searchCtrl.text),
+                        decoration: InputDecoration(
+                          hintText: '全书搜索',
+                          hintStyle: TextStyle(
+                            color: spec.secondary.withValues(alpha: 0.7),
+                            fontSize: 15,
+                          ),
+                          isDense: true,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 10,
+                          ),
+                          filled: true,
+                          fillColor: spec.secondary.withValues(alpha: 0.08),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(10),
+                            borderSide: BorderSide.none,
+                          ),
+                          prefixIcon: Icon(
+                            Icons.search,
+                            size: 20,
+                            color: spec.secondary,
+                          ),
+                        ),
+                      ),
+                    ),
+                    if (count.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        child: Text(
+                          count,
+                          style: TextStyle(
+                            color: spec.secondary,
+                            fontSize: 13,
+                            fontFeatures: const [FontFeature.tabularFigures()],
+                          ),
+                        ),
+                      ),
+                    IconButton(
+                      tooltip: '上一条（F3 反向）',
+                      icon: Icon(Icons.keyboard_arrow_up, color: fg),
+                      onPressed: _searchResults.isEmpty
+                          ? null
+                          : () => _stepHit(-1),
+                    ),
+                    IconButton(
+                      tooltip: '下一条（F3）',
+                      icon: Icon(Icons.keyboard_arrow_down, color: fg),
+                      onPressed: _searchResults.isEmpty
+                          ? null
+                          : () => _stepHit(1),
+                    ),
+                    IconButton(
+                      tooltip: '关闭（Esc）',
+                      icon: Icon(Icons.close, color: fg),
+                      onPressed: _closeSearch,
+                    ),
+                  ],
+                ),
+                if (_searching)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 6),
+                    child: LinearProgressIndicator(minHeight: 2),
+                  ),
+                if (_searchResults.isNotEmpty)
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 240),
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      padding: const EdgeInsets.only(top: 4),
+                      itemCount: _searchResults.length,
+                      itemExtent: 52,
+                      itemBuilder: (context, i) {
+                        final h = _searchResults[i];
+                        final active = i == _searchIndex;
+                        final doc = ref.read(readerControllerProvider).document;
+                        final chapterTitle =
+                            doc != null && h.spineIndex < doc.spine.length
+                            ? doc.spine[h.spineIndex].title
+                            : '';
+                        return InkWell(
+                          onTap: () => _gotoHit(i),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 6,
+                            ),
+                            decoration: BoxDecoration(
+                              color: active
+                                  ? spec.accent.withValues(alpha: 0.10)
+                                  : null,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Text(
+                                  h.snippet,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: active ? spec.accent : fg,
+                                    fontSize: 13.5,
+                                  ),
+                                ),
+                                if (chapterTitle.isNotEmpty)
+                                  Text(
+                                    chapterTitle,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      color: spec.secondary.withValues(
+                                        alpha: 0.8,
+                                      ),
+                                      fontSize: 11,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildMenu(
     ReaderState state,
     ReaderSettings settings,
@@ -953,6 +1272,11 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
                         fontWeight: FontWeight.w600,
                       ),
                     ),
+                  ),
+                  IconButton(
+                    tooltip: '全文搜索（Ctrl+F）',
+                    icon: Icon(Icons.search, color: fg),
+                    onPressed: _openSearch,
                   ),
                 ],
               ),
@@ -2101,4 +2425,13 @@ class _PdfReaderViewState extends ConsumerState<_PdfReaderView> {
       },
     );
   }
+}
+
+/// 全文搜索命中：spine 序号 + 章内字符偏移 + 上下文摘要
+class _SearchHit {
+  const _SearchHit(this.spineIndex, this.charOffset, this.snippet);
+
+  final int spineIndex;
+  final int charOffset;
+  final String snippet;
 }

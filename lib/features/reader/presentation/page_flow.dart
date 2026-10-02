@@ -33,6 +33,7 @@ class PageCanvas extends StatelessWidget {
     required this.margins,
     this.resources,
     this.marks = const [],
+    this.searchMarks = const [],
     this.selection,
   });
 
@@ -44,6 +45,9 @@ class PageCanvas extends StatelessWidget {
 
   /// 已保存的批注（章内字符区间）
   final List<PageMark> marks;
+
+  /// 全文搜索命中（章内字符区间；styleIndex 0=普通命中 1=当前命中）
+  final List<PageMark> searchMarks;
 
   /// 进行中的划词选择（章内字符区间，有序）
   final (int, int)? selection;
@@ -58,6 +62,7 @@ class PageCanvas extends StatelessWidget {
         margins: margins,
         resources: resources,
         marks: marks,
+        searchMarks: searchMarks,
         selection: selection,
         // 关键修复：异步图片加载完成不会改变 page/laid 对象，
         // shouldRepaint 恒为 false 导致除首章外的图片永远停留在占位框。
@@ -129,11 +134,13 @@ class PageCanvas extends StatelessWidget {
         final quoteIndent = lb.quoteDepth * 18.0;
         // painter 原点在画布上的位置（partial 单位 painter 平移到行顶）
         final originDy = y - lb.lineTops[unit.firstLine];
-        final pos = lb.painter.getPositionForOffset(
+        // 逐行对齐块内按行 painter 精确命中；painter 坐标 → 章内坐标：
+        // 剔除前缀（缩进/列表标号），限幅到块内
+        final pos = lb.paintedCharAt(
           Offset(local.dx - margins.left - quoteIndent, local.dy - originDy),
         );
-        // painter 坐标 → 章内坐标：剔除前缀（缩进/列表标号），限幅到块内
-        final inBlock = (pos.offset - lb.prefixChars).clamp(
+        if (pos == null) continue;
+        final inBlock = (pos - lb.prefixChars).clamp(
           0,
           lb.block.plainText.length,
         );
@@ -207,10 +214,8 @@ class PageCanvas extends StatelessWidget {
             maxOffset,
           );
           if (pStart < pEnd) {
-            final boxes = lb.painter.getBoxesForSelection(
-              TextSelection(baseOffset: pStart, extentOffset: pEnd),
-              boxHeightStyle: ui.BoxHeightStyle.tight,
-            );
+            // 逐行对齐块内按行 painter 取盒（与绘制像素一致）
+            final boxes = lb.boxesForRange(pStart, pEnd);
             // painter 原点在页面局部坐标中的位置
             final originDy = y - lb.lineTops[unit.firstLine];
             final originDx = margins.left + lb.quoteDepth * 18.0;
@@ -243,6 +248,7 @@ class _PagePainter extends CustomPainter {
     required this.margins,
     this.resources,
     this.marks = const [],
+    this.searchMarks = const [],
     this.selection,
     super.repaint,
   });
@@ -253,6 +259,7 @@ class _PagePainter extends CustomPainter {
   final EdgeInsets margins;
   final ResourceStore? resources;
   final List<PageMark> marks;
+  final List<PageMark> searchMarks;
   final (int, int)? selection;
 
   static final imageCache = <String, ui.Image>{};
@@ -319,6 +326,7 @@ class _PagePainter extends CustomPainter {
         y - lb.lineTops[unit.firstLine],
       );
       final ranges = _rangesForBlock(lb);
+      final justLines = lb.justLines;
 
       canvas.save();
       canvas.clipRect(
@@ -329,9 +337,24 @@ class _PagePainter extends CustomPainter {
           visibleH,
         ),
       );
+      // 第零遍：全文搜索命中 —— 圆角高亮垫在最下方
+      _paintSearch(canvas, lb, painterOrigin);
       // 第一遍：背景高亮（样式 0）与选区 —— 垫在文字下方
       _paintRanges(canvas, lb, painterOrigin, ranges, underlinePass: false);
-      if (fullBlock) {
+      if (justLines != null) {
+        // 两端对齐：逐行 painter 绘制（与取盒/命中同一坐标来源，像素一致）
+        for (
+          var i = unit.firstLine;
+          i < unit.firstLine + unit.lineCount && i < justLines.length;
+          i++
+        ) {
+          final line = justLines[i];
+          line.painter.paint(
+            canvas,
+            Offset(painterOrigin.dx, painterOrigin.dy + line.top),
+          );
+        }
+      } else if (fullBlock) {
         lb.painter.paint(canvas, painterOrigin);
       } else {
         final top = lb.lineTops[unit.firstLine];
@@ -352,9 +375,51 @@ class _PagePainter extends CustomPainter {
       _paintRanges(canvas, lb, painterOrigin, ranges, underlinePass: true);
       // 振假名（ruby 注音）绘制在文字上方
       _paintRuby(canvas, lb, painterOrigin, unit);
+      // 行内图片（注标角标图/段内插图）绘制在占位盒内
+      if (lb.inlineImages.isNotEmpty) {
+        _paintInlineImages(canvas, lb, painterOrigin, unit);
+      }
       canvas.restore();
 
       y += visibleH;
+    }
+  }
+
+  /// 绘制全文搜索命中：圆角高亮（styleIndex 0=普通命中浅色，
+  /// 1=当前命中加深刻度 + 描边）
+  void _paintSearch(Canvas canvas, LaidOutBlock lb, Offset origin) {
+    if (searchMarks.isEmpty) return;
+    final blockEnd = lb.charBase + lb.block.plainText.length;
+    final pTextLen = lb.prefixChars + lb.block.plainText.length;
+    for (final m in searchMarks) {
+      if (m.end <= lb.charBase || m.start >= blockEnd) continue;
+      final ps = ((m.start - lb.charBase) + lb.prefixChars).clamp(0, pTextLen);
+      final pe = ((m.end - lb.charBase) + lb.prefixChars).clamp(0, pTextLen);
+      if (ps >= pe) continue;
+      final active = m.styleIndex == 1;
+      final boxes = lb.boxesForRange(ps, pe);
+      for (final box in boxes) {
+        final r = Rect.fromLTRB(
+          origin.dx + box.left,
+          origin.dy + box.top,
+          origin.dx + box.right,
+          origin.dy + box.bottom,
+        ).inflate(active ? 1.5 : 1.0);
+        final rr = RRect.fromRectAndRadius(r, const Radius.circular(3));
+        canvas.drawRRect(
+          rr,
+          Paint()..color = theme.accent.withValues(alpha: active ? 0.45 : 0.20),
+        );
+        if (active) {
+          canvas.drawRRect(
+            rr,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 1.2
+              ..color = theme.accent.withValues(alpha: 0.85),
+          );
+        }
+      }
     }
   }
 
@@ -399,10 +464,8 @@ class _PagePainter extends CustomPainter {
     for (final (pStart, pEnd, color, styleIndex) in ranges) {
       final isUnderline = styleIndex != 0;
       if (isUnderline != underlinePass) continue;
-      final boxes = lb.painter.getBoxesForSelection(
-        TextSelection(baseOffset: pStart, extentOffset: pEnd),
-        boxHeightStyle: ui.BoxHeightStyle.tight,
-      );
+      // 逐行对齐块内按行 painter 取盒（与绘制像素一致）
+      final boxes = lb.boxesForRange(pStart, pEnd);
       for (final box in boxes) {
         final r = Rect.fromLTRB(
           painterOrigin.dx + box.left,
@@ -460,10 +523,7 @@ class _PagePainter extends CustomPainter {
         final pStart = (segStart + lb.prefixChars).clamp(0, maxOffset);
         final pEnd = (segEnd + lb.prefixChars).clamp(0, maxOffset);
         if (pStart >= pEnd) continue;
-        final boxes = lb.painter.getBoxesForSelection(
-          TextSelection(baseOffset: pStart, extentOffset: pEnd),
-          boxHeightStyle: ui.BoxHeightStyle.tight,
-        );
+        final boxes = lb.boxesForRange(pStart, pEnd);
         if (boxes.isEmpty) continue;
         var left = double.infinity;
         var right = double.negativeInfinity;
@@ -578,6 +638,70 @@ class _PagePainter extends CustomPainter {
     }
   }
 
+  /// 绘制行内图片（注标角标图/段内插图）：占位盒内 aspect-fit 绘制真实图片，
+  /// 未加载完成时先画淡色占位并异步加载（复用块级图片的缓存与加载逻辑）。
+  /// 盒坐标经 boxesForRange 取得，与文字绘制像素一致。
+  void _paintInlineImages(
+    Canvas canvas,
+    LaidOutBlock lb,
+    Offset origin,
+    PageUnit unit,
+  ) {
+    final firstLine = unit.firstLine;
+    final unitTop = lb.lineTops[firstLine];
+    final unitBottom =
+        lb.lineTops[firstLine + unit.lineCount - 1] +
+        lb.lineHeights[firstLine + unit.lineCount - 1];
+    for (final (pos, src) in lb.inlineImages) {
+      final pStart = lb.prefixChars + pos;
+      final boxes = lb.boxesForRange(pStart, pStart + 1);
+      for (final b in boxes) {
+        // 部分单元只画落在本单元行范围内的盒
+        final cy = b.top + b.height / 2;
+        if (cy < unitTop - 0.5 || cy > unitBottom + 0.5) continue;
+        final rect = Rect.fromLTRB(
+          origin.dx + b.left,
+          origin.dy + b.top,
+          origin.dx + b.right,
+          origin.dy + b.bottom,
+        );
+        final img = imageCache[src];
+        if (img != null) {
+          final srcRect = Rect.fromLTWH(
+            0,
+            0,
+            img.width.toDouble(),
+            img.height.toDouble(),
+          );
+          final s1 = rect.width / img.width;
+          final s2 = rect.height / img.height;
+          final s = s1 < s2 ? s1 : s2;
+          final dst = Rect.fromCenter(
+            center: rect.center,
+            width: img.width * s,
+            height: img.height * s,
+          );
+          canvas.drawImageRect(
+            img,
+            srcRect,
+            dst,
+            Paint()..filterQuality = FilterQuality.medium,
+          );
+        } else {
+          // 占位：淡色圆角块，等待异步加载完成重绘
+          canvas.drawRRect(
+            RRect.fromRectAndRadius(rect, const Radius.circular(2)),
+            Paint()..color = theme.secondary.withValues(alpha: 0.25),
+          );
+          if (resources != null && !imageLoading.contains(src)) {
+            imageLoading.add(src);
+            _loadImage(src);
+          }
+        }
+      }
+    }
+  }
+
   Future<void> _loadImage(String src) async {
     try {
       final data = await resources!.get(src);
@@ -603,7 +727,8 @@ class _PagePainter extends CustomPainter {
       old.theme != theme ||
       old.laid != laid ||
       old.selection != selection ||
-      !listEquals(old.marks, marks);
+      !listEquals(old.marks, marks) ||
+      !listEquals(old.searchMarks, searchMarks);
 }
 
 /// 翻页动画类型（无/覆盖/平移）
@@ -631,6 +756,7 @@ class PageFlow extends StatefulWidget {
     required this.animType,
     this.duration = const Duration(milliseconds: 300),
     this.onTapCenter,
+    this.onTapProbe,
     this.enabled = true,
     this.onLongPressStart,
     this.onLongPressMoveUpdate,
@@ -648,6 +774,10 @@ class PageFlow extends StatefulWidget {
   /// 中部点按回调（携带局部坐标，用于批注命中）
   final void Function(Offset localPosition)? onTapCenter;
   final bool enabled;
+
+  /// 点按预检（注标等特殊元素命中）：返回 true 表示已消费本次点按，
+  /// 不再走三区翻页判定——修复注标角标位于左右翻页热区时点击不到的 bug
+  final bool Function(Offset localPosition)? onTapProbe;
 
   /// 长按手势透传（批注：长按划词选择）。为 null 时不注册长按手势。
   final GestureLongPressStartCallback? onLongPressStart;
@@ -719,8 +849,11 @@ class _PageFlowState extends State<PageFlow>
       return;
     }
     if (x < w * 0.3) {
+      // 注标预检：角标落在翻页热区内也可点开注释
+      if (widget.onTapProbe?.call(d.localPosition) ?? false) return;
       _turn(widget.onPrev, -1);
     } else if (x > w * 0.7) {
+      if (widget.onTapProbe?.call(d.localPosition) ?? false) return;
       _turn(widget.onNext, 1);
     } else {
       widget.onTapCenter?.call(d.localPosition);

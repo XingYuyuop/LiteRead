@@ -9,7 +9,13 @@ enum InlineFlag { bold, italic, link, noteref }
 
 /// 行内片段：一段带样式的纯文本
 class InlineRun {
-  const InlineRun(this.text, {this.flags = const {}, this.ruby, this.refId});
+  const InlineRun(
+    this.text, {
+    this.flags = const {},
+    this.ruby,
+    this.refId,
+    this.imageSrc,
+  });
 
   final String text;
   final Set<InlineFlag> flags;
@@ -22,10 +28,15 @@ class InlineRun {
   /// 对应 [Chapter.footnotes] 中的脚注内容；仅 noteref 片段非空。
   final String? refId;
 
+  /// 行内图片资源 id（段落内嵌插图/注标角标图）。
+  /// 非空时 [text] 为单个对象占位符 U+FFFC，渲染层绘制真实图片。
+  final String? imageSrc;
+
   bool get hasBold => flags.contains(InlineFlag.bold);
   bool get hasItalic => flags.contains(InlineFlag.italic);
   bool get hasLink => flags.contains(InlineFlag.link);
   bool get hasNoteref => flags.contains(InlineFlag.noteref);
+  bool get isImage => imageSrc != null;
 }
 
 /// 块级元素类型（HTML-lite 白名单子集）
