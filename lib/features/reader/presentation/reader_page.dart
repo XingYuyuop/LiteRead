@@ -1064,12 +1064,22 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     ),
   );
 
-  /// 进度调整：常驻显示；拖动即时跳转；不自动关闭，由用户点「完成」确认
+  /// 进度调整：常驻显示；拖动即时跳转；左右按钮切换上一章/下一章
   Widget _buildProgressRow(ReaderState state, ReaderThemeSpec spec) {
     return Row(
       children: [
-        Text('进度', style: TextStyle(fontSize: 12, color: spec.secondary)),
-        const SizedBox(width: 8),
+        IconButton(
+          tooltip: '上一章',
+          icon: Icon(Icons.skip_previous, color: spec.accent, size: 22),
+          onPressed: state.spineIndex > 0
+              ? () async {
+                  await ref
+                      .read(readerControllerProvider.notifier)
+                      .jumpToChapter(state.spineIndex - 1);
+                  if (mounted) _closeMenu();
+                }
+              : null,
+        ),
         Expanded(
           child: SliderTheme(
             data: SliderTheme.of(context).copyWith(
@@ -1088,9 +1098,16 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
           style: TextStyle(fontSize: 12, color: spec.foreground),
         ),
         IconButton(
-          tooltip: '完成并关闭菜单',
-          icon: Icon(Icons.check, color: spec.accent, size: 22),
-          onPressed: _closeMenu,
+          tooltip: '下一章',
+          icon: Icon(Icons.skip_next, color: spec.accent, size: 22),
+          onPressed: state.spineIndex + 1 < (state.document?.spine.length ?? 0)
+              ? () async {
+                  await ref
+                      .read(readerControllerProvider.notifier)
+                      .jumpToChapter(state.spineIndex + 1);
+                  if (mounted) _closeMenu();
+                }
+              : null,
         ),
       ],
     );
@@ -1170,8 +1187,6 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
               ),
           ],
         ),
-        const SizedBox(height: 10),
-        PageAnimPreview(type: pageTurnTypeOf(settings.pageAnim)),
       ],
     );
   }
