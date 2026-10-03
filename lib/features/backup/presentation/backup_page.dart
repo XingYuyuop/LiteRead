@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../../../app/theme_controller.dart';
 import '../../../core/ui/app_snackbar.dart';
@@ -55,6 +56,7 @@ class _BackupPageState extends ConsumerState<BackupPage> {
   late final TextEditingController _webdavUrlCtrl;
   late final TextEditingController _webdavUserCtrl;
   late final TextEditingController _webdavPassCtrl;
+  late final TextEditingController _webdavFolderCtrl;
   late final TextEditingController _s3EndpointCtrl;
   late final TextEditingController _s3BucketCtrl;
   late final TextEditingController _s3KeyCtrl;
@@ -72,22 +74,29 @@ class _BackupPageState extends ConsumerState<BackupPage> {
     _webdavUrlCtrl = TextEditingController();
     _webdavUserCtrl = TextEditingController();
     _webdavPassCtrl = TextEditingController();
+    _webdavFolderCtrl = TextEditingController();
     _s3EndpointCtrl = TextEditingController();
     _s3BucketCtrl = TextEditingController();
     _s3KeyCtrl = TextEditingController();
     _s3SecretCtrl = TextEditingController();
     _s3RegionCtrl = TextEditingController();
+    // beacon 被动发现：对端广播到达时实时并入设备列表（不依赖扫描轮次）
+    ref.read(lanSyncServerProvider).discovered.addListener(_onBeaconDiscovered);
     _load();
   }
 
   @override
   void dispose() {
+    ref.read(lanSyncServerProvider).discovered.removeListener(
+      _onBeaconDiscovered,
+    );
     _scanTimer?.cancel();
     _localPathCtrl.dispose();
     _lanAddrCtrl.dispose();
     _webdavUrlCtrl.dispose();
     _webdavUserCtrl.dispose();
     _webdavPassCtrl.dispose();
+    _webdavFolderCtrl.dispose();
     _s3EndpointCtrl.dispose();
     _s3BucketCtrl.dispose();
     _s3KeyCtrl.dispose();
@@ -110,6 +119,7 @@ class _BackupPageState extends ConsumerState<BackupPage> {
       _webdavUrlCtrl.text = cfg.webdavUrl;
       _webdavUserCtrl.text = cfg.webdavUser;
       _webdavPassCtrl.text = cfg.webdavPass;
+      _webdavFolderCtrl.text = cfg.folderName;
       _s3EndpointCtrl.text = cfg.s3Endpoint;
       _s3BucketCtrl.text = cfg.s3Bucket;
       _s3KeyCtrl.text = cfg.s3AccessKey;
@@ -235,6 +245,36 @@ class _BackupPageState extends ConsumerState<BackupPage> {
 
   // ---- 操作 ----
 
+  /// 本地文件夹备份的 Android 存储权限：
+  /// Android 11+ 分区存储下写公共目录需「所有文件访问」（MANAGE_EXTERNAL_STORAGE），
+  /// Android 10 及以下走传统存储权限 + requestLegacyExternalStorage。
+  /// 返回 null 表示已授权，否则为失败提示文案。
+  Future<String?> _ensureLocalWritePermission() async {
+    if (!Platform.isAndroid) return null;
+    final major = int.tryParse(
+      Platform.version.split('.').first,
+    );
+    if (major != null && major >= 11) {
+      var st = await Permission.manageExternalStorage.status;
+      if (!st.isGranted) {
+        st = await Permission.manageExternalStorage.request();
+      }
+      if (!st.isGranted) {
+        return '本地备份需要「所有文件访问」权限：请在系统设置中允许 LiteRead '
+            '访问所有文件后重试（或改用 WebDAV/局域网备份）';
+      }
+      return null;
+    }
+    var st = await Permission.storage.status;
+    if (!st.isGranted) {
+      st = await Permission.storage.request();
+    }
+    if (!st.isGranted) {
+      return '本地备份需要存储权限：请在系统设置中授予后重试';
+    }
+    return null;
+  }
+
   /// 进度回调：同步操作步数到状态（含百分比），驱动进度条动画
   BackupProgressCallback get _onProgress => (done, total, phase) {
     if (!mounted) return;
@@ -263,6 +303,13 @@ class _BackupPageState extends ConsumerState<BackupPage> {
     )
     op,
   ) async {
+    if (_cfg.type == BackupTargetType.local) {
+      final err = await _ensureLocalWritePermission();
+      if (err != null) {
+        _toast(err);
+        return;
+      }
+    }
     final store = await _safeStore();
     if (store == null) return;
     setState(() {
@@ -357,6 +404,13 @@ class _BackupPageState extends ConsumerState<BackupPage> {
   }
 
   Future<void> _onRestore() async {
+    if (_cfg.type == BackupTargetType.local) {
+      final err = await _ensureLocalWritePermission();
+      if (err != null) {
+        _toast(err);
+        return;
+      }
+    }
     final store = await _safeStore();
     if (store == null) return;
     setState(() {
@@ -520,14 +574,17 @@ class _BackupPageState extends ConsumerState<BackupPage> {
   /// 扫描局域网设备。
   /// [auto]=true 为后台持续扫描轮次：静默（不弹 toast），结束后排下一轮；
   /// 局域网页面驻留期间每 5 秒重扫一次，设备列表持续刷新。
+  /// 结果与共享服务的 beacon 被动发现合并：beacon 单向广播、无需回包，
+  /// 扫描（DISCOVER 应答/TCP 探测）被拦截时 beacon 仍可发现设备。
   Future<void> _scanDevices({bool auto = false}) async {
     if (_scanning) return;
     setState(() => _scanning = true);
     try {
       final found = await LanScanner.scan();
       if (!mounted) return;
-      setState(() => _devices = found);
-      if (found.isEmpty && !auto) {
+      final merged = _mergedDevices(found);
+      setState(() => _devices = merged);
+      if (merged.isEmpty && !auto) {
         _toast(
           '未发现局域网设备：请确认对端已进入「备份」页并选择「局域网设备」'
           '（进入即自动开启共享），且两台设备连同一网络',
@@ -552,6 +609,36 @@ class _BackupPageState extends ConsumerState<BackupPage> {
         }
       });
     }
+  }
+
+  /// 扫描结果与 beacon 被动发现合并（扫描结果优先：携带对端全部网卡地址）
+  List<LanDevice> _mergedDevices(Iterable<LanDevice> scan) {
+    final map = <String, LanDevice>{
+      for (final d in ref.read(lanSyncServerProvider).discovered.value)
+        '${d.address}:${d.port}': d,
+      for (final d in scan) '${d.address}:${d.port}': d,
+    };
+    final list = map.values.toList()
+      ..sort((a, b) => a.name.compareTo(b.name));
+    return list;
+  }
+
+  /// beacon 发现更新：对端共享服务每 2 秒广播一次，设备列表实时并入
+  void _onBeaconDiscovered() {
+    if (!mounted) return;
+    final merged = _mergedDevices(_devices);
+    final same =
+        merged.length == _devices.length &&
+        merged.every(
+          (d) => _devices.any(
+            (x) =>
+                x.address == d.address &&
+                x.port == d.port &&
+                x.name == d.name,
+          ),
+        );
+    if (same) return;
+    setState(() => _devices = merged);
   }
 
   /// 手动输入设备地址直连（扫描被路由器/防火墙拦截时的兜底）
@@ -646,6 +733,8 @@ class _BackupPageState extends ConsumerState<BackupPage> {
     }
     if (!plan.pull &&
         !plan.push &&
+        !plan.pullSettings &&
+        !plan.pushSettings &&
         plan.deleteLocalIds.isEmpty &&
         plan.deleteRemoteIds.isEmpty) {
       await store.dispose();
@@ -669,6 +758,9 @@ class _BackupPageState extends ConsumerState<BackupPage> {
           push: plan.push,
           deleteLocalIds: plan.deleteLocalIds.toList(),
           deleteRemoteIds: plan.deleteRemoteIds.toList(),
+          pullSettings: plan.pullSettings,
+          pushSettings: plan.pushSettings,
+          opts: _opts,
           onProgress: (done, total, phase) {
             prog.update(done, total, phase);
             _onProgress(done, total, phase);
@@ -726,6 +818,8 @@ class _BackupPageState extends ConsumerState<BackupPage> {
           final canSubmit =
               plan.pull ||
               plan.push ||
+              plan.pullSettings ||
+              plan.pushSettings ||
               plan.deleteLocalIds.isNotEmpty ||
               plan.deleteRemoteIds.isNotEmpty;
           return AlertDialog(
@@ -766,6 +860,32 @@ class _BackupPageState extends ConsumerState<BackupPage> {
                       ),
                     ),
                     onChanged: (v) => setDialog(() => plan.push = v ?? false),
+                  ),
+                  CheckboxListTile(
+                    dense: true,
+                    value: plan.pullSettings,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('拉取对端设置'),
+                    subtitle: const Text(
+                      '主题、阅读偏好、备份配置（WebDAV 地址等）覆盖本机',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                    onChanged: (v) =>
+                        setDialog(() => plan.pullSettings = v ?? false),
+                  ),
+                  CheckboxListTile(
+                    dense: true,
+                    value: plan.pushSettings,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('推送本机设置'),
+                    subtitle: const Text(
+                      '把本机设置（含备份配置）写入对端设备',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                    onChanged: (v) =>
+                        setDialog(() => plan.pushSettings = v ?? false),
                   ),
                   if (diff.localOnly.isNotEmpty)
                     Theme(
@@ -1130,6 +1250,12 @@ class _BackupPageState extends ConsumerState<BackupPage> {
             onChanged: (v) => _update((c) => c.copyWith(webdavUrl: v)),
           ),
           _TextField(
+            controller: _webdavFolderCtrl,
+            label: '文件夹（可选）',
+            hint: '默认 LiteRead，不存在时自动创建',
+            onChanged: (v) => _update((c) => c.copyWith(folderName: v.trim())),
+          ),
+          _TextField(
             controller: _webdavUserCtrl,
             label: '账号（可选）',
             onChanged: (v) => _update((c) => c.copyWith(webdavUser: v)),
@@ -1395,6 +1521,8 @@ class _TextField extends StatelessWidget {
 class _SyncPlan {
   bool pull = false;
   bool push = false;
+  bool pullSettings = false;
+  bool pushSettings = false;
   final deleteLocalIds = <String>{};
   final deleteRemoteIds = <String>{};
 }

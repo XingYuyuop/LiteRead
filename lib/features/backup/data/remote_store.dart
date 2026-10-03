@@ -604,6 +604,18 @@ class LanStore extends RemoteStore {
     }
   }
 
+  /// 推送本机设置到对端（局域网设置同步：WebDAV 地址、阅读偏好等）
+  Future<void> pushSettings(Map<String, String> settings) async {
+    final req = await _client.postUrl(_uri('settings'));
+    req.headers.contentType = ContentType.json;
+    req.add(utf8.encode(jsonEncode(settings)));
+    final res = await req.close().timeout(_reqTimeout);
+    await res.drain<void>().timeout(_reqTimeout);
+    if (res.statusCode >= 300) {
+      throw BackupException('设置推送失败（HTTP ${res.statusCode}）');
+    }
+  }
+
   /// 把本机同步进度推送给对端展示（双方进度）。
   /// fire-and-forget：失败静默，短超时不阻塞同步主流程。
   Future<void> postSyncProgress({

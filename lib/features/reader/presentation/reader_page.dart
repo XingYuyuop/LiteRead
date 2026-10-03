@@ -73,6 +73,15 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     // 移动端：进入阅读页即隐藏系统状态栏/导航栏（沉浸式全屏），退出时恢复
     if (Platform.isAndroid || Platform.isIOS) {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      // 兼容无法隐藏状态栏的 ROM：状态栏保持透明（内容绘制到其后面），
+      // 隐藏失败时也不会出现顶部黑色条块
+      SystemChrome.setSystemUIOverlayStyle(
+        const SystemUiOverlayStyle(
+          statusBarColor: Colors.transparent,
+          systemNavigationBarColor: Colors.transparent,
+          systemNavigationBarDividerColor: Colors.transparent,
+        ),
+      );
     }
     _loadHighlights();
     // 时间/电量每 30 秒刷新一次
@@ -118,6 +127,13 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     // 移动端：离开阅读页恢复系统栏
     if (Platform.isAndroid || Platform.isIOS) {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      SystemChrome.setSystemUIOverlayStyle(
+        const SystemUiOverlayStyle(
+          statusBarColor: Colors.transparent,
+          systemNavigationBarColor: Colors.transparent,
+          systemNavigationBarDividerColor: Colors.transparent,
+        ),
+      );
     }
     // 离开时保存进度并重置会话
     ref.read(readerControllerProvider.notifier).close();
@@ -696,17 +712,29 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
   /// 在左右翻页热区同样生效——修复角标处于翻页位置时点击不到的 bug。
   bool _onTapProbe(Offset local) {
     if (_selecting || _activeHighlight != null) return false;
-    final char = _hitTestChar(local);
-    if (char == null) return false;
     final s = ref.read(readerControllerProvider);
+    final laid = _laidOf(s);
+    if (laid == null || s.pageIndex >= laid.pages.length) return false;
     final doc = s.document;
     if (doc == null || s.spineIndex < 0 || s.spineIndex >= doc.spine.length) {
       return false;
     }
-    final run = doc.spine[s.spineIndex].inlineRunAt(char) ??
-        // 占位角标图（\uFFFC）右半边点击会被映射到其后一个字符，
-        // 回退检查前一个字符的 run 才能命中注标
-        (char > 0 ? doc.spine[s.spineIndex].inlineRunAt(char - 1) : null);
+    // 优先按注标 run 的绘制盒命中（外扩触达区，点在角标旁的空隙也算），
+    // 未命中再退回字符映射；占位角标图（\uFFFC）较小，映射易偏到相邻字符
+    final char =
+        PageCanvas.hitTestNoteref(
+          laid,
+          laid.pages[s.pageIndex],
+          _effMargins,
+          local,
+        ) ??
+        _hitTestChar(local);
+    if (char == null) return false;
+    final spine = doc.spine[s.spineIndex];
+    final run = spine.inlineRunAt(char) ??
+        // 点偏到相邻字符时检查前后各一个字符的 run
+        (char > 0 ? spine.inlineRunAt(char - 1) : null) ??
+        spine.inlineRunAt(char + 1);
     final refId = run?.refId;
     if (refId == null) return false;
     final fn = _findFootnote(doc, refId, s.spineIndex);

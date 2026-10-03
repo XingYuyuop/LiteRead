@@ -428,7 +428,7 @@ class BackupService {
     );
   }
 
-  /// 执行已确认的同步动作（拉取 / 推送 / 删除本机多余 / 删除远端指定）
+  /// 执行已确认的同步动作（拉取 / 推送 / 删除本机多余 / 删除远端指定 / 设置同步）
   Future<BackupResult> applyLanDiff(
     RemoteStore store,
     LanDiff diff, {
@@ -436,6 +436,9 @@ class BackupService {
     bool push = false,
     List<String> deleteLocalIds = const [],
     List<String> deleteRemoteIds = const [],
+    bool pullSettings = false,
+    bool pushSettings = false,
+    BackupOptions opts = const BackupOptions(),
     BackupProgressCallback? onProgress,
   }) async {
     final r = BackupResult();
@@ -443,6 +446,8 @@ class BackupService {
     final total =
         (pull ? diff.remoteOnly.length : 0) +
         (push ? diff.localOnly.length : 0) +
+        (pullSettings ? 1 : 0) +
+        (pushSettings ? 1 : 0) +
         (pull || push ? 1 : 0); // + 进度合并
     var done = 0;
     void step(String phase) => onProgress?.call(++done, total, phase);
@@ -460,6 +465,34 @@ class BackupService {
         r.booksUploaded++;
         step('推送书籍');
       }
+    }
+    // 设置同步：拉取对端设置 / 推送本机设置（含备份配置如 WebDAV 地址）
+    if (pullSettings) {
+      onProgress?.call(done, total, '拉取设置');
+      final raw = await store.getFile('manifest.json');
+      if (raw != null) {
+        try {
+          final j = jsonDecode(utf8.decode(raw)) as Map<String, dynamic>;
+          final remote =
+              (j['settings'] as Map<String, dynamic>?)?.cast<String, String>() ??
+              const {};
+          for (final e in opts.filterSettings(remote).entries) {
+            await _db.setSetting(e.key, e.value);
+          }
+          r.settingsRestored = true;
+        } catch (_) {}
+      }
+      step('拉取设置');
+    }
+    if (pushSettings && store is LanStore) {
+      onProgress?.call(done, total, '推送设置');
+      try {
+        await store.pushSettings(
+          opts.filterSettings(await _repo.allSettings()),
+        );
+        r.settingsRestored = true;
+      } catch (_) {}
+      step('推送设置');
     }
     // 本机删除指定内容（用户在确认对话框中勾选）
     if (deleteLocalIds.isNotEmpty) {

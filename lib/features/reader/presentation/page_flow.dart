@@ -151,6 +151,61 @@ class PageCanvas extends StatelessWidget {
     return null;
   }
 
+  /// 局部坐标 → 命中的注标（EPUB noteref）章内字符偏移；未命中返回 null。
+  /// 按注标 run 的实际绘制盒命中（外扩 8px 触达区），不依赖字符逐字映射——
+  /// 角标图占位盒较小，点击其两侧空隙时字符映射会偏到相邻字符，
+  /// 仅靠相邻字符回退仍会漏检。盒坐标换算与 _paintInlineImages 一致。
+  static int? hitTestNoteref(
+    LaidOutChapter laid,
+    PageBox page,
+    EdgeInsets margins,
+    Offset local,
+  ) {
+    var y = margins.top;
+    for (final unit in page.units) {
+      final lb = laid.blocks[unit.blockIndex];
+      final spaceAbove = unit.spaceAbove;
+      final visibleH = lb.lineHeights
+          .skip(unit.firstLine)
+          .take(unit.lineCount)
+          .fold(0.0, (a, b) => a + b);
+      y += spaceAbove;
+      if (!lb.isImage && lb.block.type != BlockType.hr) {
+        final quoteIndent = lb.quoteDepth * 18.0;
+        // painter 原点在画布上的位置（与 hitTestChar/_paintInlineImages 一致）
+        final originDy = y - lb.lineTops[unit.firstLine];
+        final unitTop = lb.lineTops[unit.firstLine];
+        final unitBottom =
+            lb.lineTops[unit.firstLine + unit.lineCount - 1] +
+            lb.lineHeights[unit.firstLine + unit.lineCount - 1];
+        var pos = 0;
+        for (final run in lb.block.spans) {
+          if (run.refId != null && run.text.isNotEmpty) {
+            final pStart = lb.prefixChars + pos;
+            final boxes = lb.boxesForRange(pStart, pStart + run.text.length);
+            for (final b in boxes) {
+              // 部分单元只含该盒所在行范围内的部分（与绘制过滤一致）
+              final cy = b.top + b.height / 2;
+              if (cy < unitTop - 0.5 || cy > unitBottom + 0.5) continue;
+              final rect = Rect.fromLTRB(
+                margins.left + quoteIndent + b.left - 8,
+                originDy + b.top - 8,
+                margins.left + quoteIndent + b.right + 8,
+                originDy + b.bottom + 8,
+              );
+              if (rect.contains(local)) {
+                return lb.charBase + pos;
+              }
+            }
+          }
+          pos += run.text.length;
+        }
+      }
+      y += visibleH;
+    }
+    return null;
+  }
+
   /// 局部坐标 → 命中的图片资源 src（长按查看大图用）；未命中返回 null。
   /// 判定逻辑与 _PagePainter._paintImage 的布局保持一致
   /// （含整页插图的垂直居中偏移）。

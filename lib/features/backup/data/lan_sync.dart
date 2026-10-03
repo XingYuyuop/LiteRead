@@ -67,6 +67,15 @@ class LanSyncServer {
   HttpServer? _server;
   RawDatagramSocket? _udp;
 
+  /// beacon 广播定时器：每 2 秒主动广播本机信息（发现不依赖应答回包，
+  /// 与验证过可行的对等 beacon 模式一致：双方绑定同一 UDP 端口互相收听）
+  Timer? _beaconTimer;
+
+  /// 本机共享服务的被动发现结果：对端 beacon 持续到达时设备列表实时更新，
+  /// 15 秒无 beacon 自动过期移除
+  final discovered = ValueNotifier<List<LanDevice>>(const []);
+  final _discoveredMap = <String, (LanDevice, DateTime)>{};
+
   /// WiFi 传书状态（浏览器每上传一本更新一次）
   final transferStats = ValueNotifier<LanTransferStats>(
     const LanTransferStats(),
@@ -118,7 +127,7 @@ class LanSyncServer {
     _server = server;
     server.listen(_handleRequest, onError: (_) {});
 
-    // UDP 发现应答
+    // UDP 发现：应答 DISCOVER + 周期 beacon 广播 + 收听对端 beacon
     try {
       // 本机地址集在启动时取一次即可（服务运行期间网卡通常不变）
       final localAddrs = (await allLocalIPv4s()).toList();
@@ -127,32 +136,114 @@ class LanSyncServer {
         lanSyncPort,
         reuseAddress: true,
       );
+      _udp!.broadcastEnabled = true;
       _udp!.listen((event) {
         if (event != RawSocketEvent.read) return;
         final dg = _udp!.receive();
         if (dg == null) return;
         final msg = utf8.decode(dg.data, allowMalformed: true);
-        if (msg != 'LITEREAD_DISCOVER') return;
-        final reply = utf8.encode(
-          jsonEncode({
-            'app': 'literead',
-            'name': _deviceName(),
-            'port': port,
-            'addrs': localAddrs,
-          }),
-        );
-        _udp!.send(reply, dg.address, dg.port);
+        if (msg == 'LITEREAD_DISCOVER') {
+          final reply = utf8.encode(
+            jsonEncode({
+              'app': 'literead',
+              'name': _deviceName(),
+              'port': port,
+              'addrs': localAddrs,
+            }),
+          );
+          _udp!.send(reply, dg.address, dg.port);
+          return;
+        }
+        // 对端 beacon（对端共享服务周期广播）：被动收听即发现设备。
+        // beacon 为单向广播，无需回包——回包路径（防火墙/路由）不再影响发现。
+        try {
+          final j =
+              jsonDecode(msg) as Map<String, dynamic>;
+          if (j['app'] != 'literead') return;
+          _recordDiscovered(
+            dg.address.address,
+            j,
+            localAddrs.toSet(),
+          );
+        } catch (_) {}
       });
+      // beacon 广播：每 2 秒一轮（对端被动收听本机 47816 即可发现本机）
+      _beaconTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+        _sendBeacon(localAddrs);
+      });
+      // 立即广播首轮，对端无需等满一个周期
+      _sendBeacon(localAddrs);
     } catch (_) {
       // UDP 不可用时仍可 TCP 扫描
     }
   }
 
+  /// 发送本机 beacon 广播（受限广播 + 各网卡定向广播）
+  void _sendBeacon(List<String> localAddrs) {
+    final udp = _udp;
+    if (udp == null) return;
+    final packet = utf8.encode(
+      jsonEncode({
+        'app': 'literead',
+        'name': _deviceName(),
+        'port': port,
+        'addrs': localAddrs,
+      }),
+    );
+    unawaited(
+      broadcastAddresses().then((targets) {
+        for (final t in targets) {
+          try {
+            udp.send(packet, InternetAddress(t), lanSyncPort);
+          } catch (_) {}
+        }
+      }),
+    );
+  }
+
+  /// 记录 beacon 发现的设备（自过滤 + 去重 + 过期清理）
+  void _recordDiscovered(
+    String sourceIp,
+    Map<String, dynamic> j,
+    Set<String> localAddrs,
+  ) {
+    // 源地址是本机地址 → 自身广播回环（理论不发生，防御）
+    if (localAddrs.contains(sourceIp)) return;
+    // 对端上报的任一地址与本机地址有交集 → 是自身（多网卡/热点场景）
+    final reported = <String>{
+      for (final a in (j['addrs'] as List<dynamic>? ?? const [])) a as String,
+    };
+    if (reported.any(localAddrs.contains)) return;
+    final devPort = (j['port'] as num?)?.toInt() ?? lanSyncPort;
+    final key = '$sourceIp:$devPort';
+    _discoveredMap[key] = (
+      LanDevice(
+        address: sourceIp,
+        port: devPort,
+        name: j['name'] as String? ?? '未知设备',
+        addrs: reported.toList(),
+      ),
+      DateTime.now(),
+    );
+    // 清理 15 秒无 beacon 的过期条目
+    final now = DateTime.now();
+    _discoveredMap.removeWhere(
+      ( _, v) => now.difference(v.$2).inSeconds >= 15,
+    );
+    discovered.value = [
+      for (final e in _discoveredMap.values) e.$1,
+    ]..sort((a, b) => a.name.compareTo(b.name));
+  }
+
   Future<void> stop() async {
     _server?.close(force: true);
     _server = null;
+    _beaconTimer?.cancel();
+    _beaconTimer = null;
     _udp?.close();
     _udp = null;
+    _discoveredMap.clear();
+    discovered.value = const [];
     _progressExpire?.cancel();
     _progressExpire = null;
     syncProgress.value = null;
@@ -241,6 +332,23 @@ class LanSyncServer {
           );
         } catch (_) {}
         await _json(req, {'ok': true});
+        return;
+      }
+      if (path == '/api/settings' && req.method == 'POST') {
+        // 对端推送设置（局域网设置同步）：逐键写入本机设置表
+        final bytes = await _readBody(req);
+        try {
+          final j = jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
+          for (final e in j.entries) {
+            final v = e.value;
+            if (v is String && v.isNotEmpty) {
+              await _db.setSetting(e.key, v);
+            }
+          }
+          await _json(req, {'ok': true});
+        } catch (_) {
+          await _json(req, {'ok': false});
+        }
         return;
       }
       if (path == '/api/delete-book' && req.method == 'POST') {

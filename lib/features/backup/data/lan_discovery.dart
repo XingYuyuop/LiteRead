@@ -53,6 +53,25 @@ Future<Set<String>> allLocalIPv4s() async {
   return out;
 }
 
+/// UDP 广播目标：受限广播 + 各物理网卡 /24 定向广播。
+/// 发现走 beacon 模式（双方各自周期广播，无需应答回包），
+/// 双向广播都要发全，任一方向通即可互相发现。
+Future<List<String>> broadcastAddresses() async {
+  final targets = <String>{'255.255.255.255'};
+  try {
+    for (final ni in await NetworkInterface.list()) {
+      if (LanScanner._isVirtualInterface(ni.name)) continue;
+      for (final a in ni.addresses) {
+        if (a.type != InternetAddressType.IPv4 || a.isLoopback) continue;
+        final parts = a.address.split('.');
+        if (parts.length != 4) continue;
+        targets.add('${parts[0]}.${parts[1]}.${parts[2]}.255');
+      }
+    }
+  } catch (_) {}
+  return targets.toList();
+}
+
 /// 局域网设备信息
 class LanDevice {
   const LanDevice({
@@ -295,8 +314,10 @@ class LanScanner {
     const ruleName = 'LiteRead Sync';
     final exe = Platform.resolvedExecutable;
 
-    /// 检查放行规则是否已满足（必须 verbose 才输出 Program/LocalPort 字段；
+    /// 检查放行规则是否已满足（必须 verbose 才输出 Protocol/LocalPort 字段；
     /// netsh 输出可能按列宽换行，去掉全部空白后比较）
+    /// 要求：程序规则（覆盖全部协议/端口），或 TCP+UDP 端口规则同时存在——
+    /// 缺 UDP 规则时 beacon 发现会被拦，需重建规则补齐。
     Future<bool> ruleOk() async {
       final check = await Process.run('netsh', [
         'advfirewall',
@@ -309,9 +330,15 @@ class LanScanner {
       final flat = (check.stdout as String)
           .replaceAll(RegExp(r'\s'), '')
           .toLowerCase();
-      return flat.contains(exe.replaceAll(RegExp(r'\s'), '').toLowerCase()) ||
+      final hasProgram = flat.contains(
+        exe.replaceAll(RegExp(r'\s'), '').toLowerCase(),
+      );
+      final hasTcpPort =
           flat.contains('localport:47816-47825') ||
           flat.contains('localport:47816');
+      final hasUdpPort =
+          hasTcpPort && flat.contains('protocol:udp');
+      return hasProgram || hasUdpPort;
     }
 
     try {

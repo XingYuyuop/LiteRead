@@ -28,8 +28,16 @@ Future<void> main() async {
     });
   }
 
+  // Edge-to-edge：内容绘制到状态栏/导航栏后面，系统栏保持透明。
+  // 部分 ROM 即使进入沉浸模式也无法隐藏状态栏——透明化后系统栏下方
+  // 仍是应用内容，不会再出现状态栏位置的黑色条块（兼容更多设备）。
+  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
   SystemChrome.setSystemUIOverlayStyle(
-    const SystemUiOverlayStyle(statusBarColor: Colors.transparent),
+    const SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      systemNavigationBarColor: Colors.transparent,
+      systemNavigationBarDividerColor: Colors.transparent,
+    ),
   );
 
   runApp(const AppScope());
